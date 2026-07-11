@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RPS Arena</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪨</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="boot" aria-hidden="true">
+  <div class="reactor"></div>
+  <div class="boot-line">RPS ARENA // SYSTEMS ONLINE</div>
+</div>
+
+<header class="top">
+  <div class="brand">
+    <span class="brand-arc"></span>
+    <span class="brand-name">RPS ARENA</span>
+    <span class="brand-sub">tactical combat interface</span>
+  </div>
+  <nav id="tabs">
+    <button data-tab="play" class="active">Play</button>
+    <button data-tab="watch">Watch</button>
+    <button data-tab="arena">Arena</button>
+    <button data-tab="tournament">Tournament</button>
+    <button data-tab="rules">Rules &amp; API</button>
+  </nav>
+  <button id="rebuild" class="ghost" title="recompile every bot in bots/">⟳ Rebuild bots</button>
+</header>
+
+<main>
+
+<!-- ================================================== PLAY -->
+<section id="tab-play" class="tab active">
+  <div class="setup">
+    <label>opponent
+      <select id="play-bot"></select>
+    </label>
+    <button id="play-new" class="primary">New game</button>
+    <button id="play-resign" class="ghost" hidden>Resign</button>
+    <span class="setup-note">you are the <b class="red-ink">red corner</b> — moves are simultaneous, the bot never sees yours</span>
+  </div>
+
+  <div class="table" id="play-table" hidden>
+    <div class="ledger blue" id="play-opp"></div>
+
+    <div class="duel">
+      <div class="duel-side">
+        <div class="card-slot blue" id="play-card-b"><div class="card-face back">?</div></div>
+      </div>
+      <div class="duel-mid">
+        <div class="vs">VS</div>
+        <div class="turn-count mono" id="play-turn">turn 1/100</div>
+        <div class="progress"><i id="play-prog"></i></div>
+        <div class="clash-note" id="play-clash"></div>
+      </div>
+      <div class="duel-side">
+        <div class="card-slot red" id="play-card-a"><div class="card-face back">?</div></div>
+      </div>
+    </div>
+
+    <div class="history mono" id="play-history"></div>
+
+    <div class="ledger red" id="play-you"></div>
+
+    <div class="controls" id="play-controls">
+      <div class="picker" id="pick-card"></div>
+      <div class="picker" id="pick-upgrade"></div>
+      <div class="picker" id="pick-disguise" hidden></div>
+      <button id="play-go" class="primary big" disabled>Play card</button>
+    </div>
+  </div>
+
+  <div class="banner" id="play-banner" hidden></div>
+</section>
+
+<!-- ================================================== WATCH -->
+<section id="tab-watch" class="tab">
+  <div class="setup">
+    <label>red corner <select id="watch-a"></select></label>
+    <label>blue corner <select id="watch-b"></select></label>
+    <button id="watch-go" class="primary">Fight!</button>
+    <span class="setup-note" id="watch-note"></span>
+  </div>
+
+  <div class="table" id="watch-table" hidden>
+    <div class="ledger blue" id="watch-oppL"></div>
+
+    <div class="duel">
+      <div class="duel-side"><div class="card-slot blue" id="watch-card-b"><div class="card-face back">?</div></div></div>
+      <div class="duel-mid">
+        <div class="vs">VS</div>
+        <div class="turn-count mono" id="watch-turn">–</div>
+        <div class="progress"><i id="watch-prog"></i></div>
+        <div class="clash-note" id="watch-clash"></div>
+      </div>
+      <div class="duel-side"><div class="card-slot red" id="watch-card-a"><div class="card-face back">?</div></div></div>
+    </div>
+
+    <div class="history mono" id="watch-history"></div>
+
+    <div class="ledger red" id="watch-youL"></div>
+
+    <div class="transport">
+      <button id="w-restart" title="restart">⏮</button>
+      <button id="w-playpause" title="play / pause">▶</button>
+      <button id="w-step" title="one turn">⏭</button>
+      <select id="w-speed">
+        <option value="900">0.5×</option>
+        <option value="450" selected>1×</option>
+        <option value="220">2×</option>
+        <option value="90">4×</option>
+      </select>
+      <input type="range" id="w-scrub" min="0" max="0" value="0">
+      <span class="mono" id="w-pos">0/0</span>
+    </div>
+    <div class="banner" id="watch-banner" hidden></div>
+  </div>
+</section>
+
+<!-- ================================================== ARENA -->
+<section id="tab-arena" class="tab">
+  <div class="setup">
+    <label>bot A <select id="arena-a"></select></label>
+    <label>bot B <select id="arena-b"></select></label>
+    <label>games
+      <select id="arena-n">
+        <option>10</option><option selected>50</option><option>100</option><option>200</option>
+      </select>
+    </label>
+    <button id="arena-go" class="primary">Run match</button>
+    <span class="setup-note">every game is a fresh pair of processes with a new seed</span>
+  </div>
+  <div id="arena-out" hidden>
+    <div class="stat-row" id="arena-tiles"></div>
+    <div class="winbar-wrap">
+      <div class="winbar" id="arena-bar"></div>
+      <div class="legend" id="arena-legend"></div>
+    </div>
+    <h3 class="section-label">games <span class="hint">— click one to replay it in Watch</span></h3>
+    <div class="dots" id="arena-dots"></div>
+  </div>
+</section>
+
+<!-- ================================================== TOURNAMENT -->
+<section id="tab-tournament" class="tab">
+  <div class="setup">
+    <label>games per pairing
+      <select id="tour-n"><option>4</option><option selected>10</option><option>20</option></select>
+    </label>
+    <button id="tour-go" class="primary">Run tournament</button>
+    <span class="setup-note">round robin over every bot in <span class="mono">build/bots</span></span>
+  </div>
+  <div id="tour-out" hidden>
+    <table class="standings" id="tour-table"></table>
+    <h3 class="section-label">head to head <span class="hint">— row vs column, tinted by row's win rate</span></h3>
+    <div class="grid-wrap"><table class="h2h mono" id="tour-grid"></table></div>
+  </div>
+</section>
+
+<!-- ================================================== RULES -->
+<section id="tab-rules" class="tab">
+  <div class="docs">
+    <h2>The game in one breath</h2>
+    <p>Both players start with <b>21 cards</b> — 7🪨 7📄 7✂️ — and pick one card each turn, simultaneously.
+    Loser's card is <b>destroyed forever</b>; winner's card (and both cards on a tie) go back to hand.
+    Run out of cards and you lose. Survive 100 turns and the bigger hand wins.
+    Everything is <b>public</b>: both sides see both hands, coins, and history.</p>
+
+    <h2>Crafticoins 🪙</h2>
+    <p>Play the same <i>base</i> shape two turns in a row → <b>+1 Crafticoin</b> (even if the card died; disguises count as their base; you can't spend a coin the same turn you earn it).</p>
+
+    <h2>Upgrades</h2>
+    <table class="rules-table">
+      <tr><th class="mono">r+</th><td><b>1🪙</b></td><td>beats the plain version of itself (<span class="mono">r+</span> beats <span class="mono">r</span>); normal rules vs everything else; <span class="mono">r+</span> vs <span class="mono">r+</span> ties</td></tr>
+      <tr><th class="mono">r?p</th><td><b>1🪙</b></td><td>your rock <i>fights as paper</i> this turn; if it survives it returns as a rock; coin combos use the real base shape</td></tr>
+      <tr><th class="mono">r!</th><td><b>2🪙</b></td><td>bomb: if it <b>loses</b>, the card that beat it is destroyed too; on a win or tie it just returns as a normal card</td></tr>
+    </table>
+    <p class="fine">One upgrade per card per turn. A disguise must be a different shape. Illegal move, crash, or blowing the per-move time limit (default 300&nbsp;ms) forfeits the game — humans in the Play tab get a retry instead.</p>
+
+    <h2>Write your bot in four steps</h2>
+    <ol class="steps">
+      <li>Open <span class="mono">bots/my_bot.cpp</span> — it's a working bot with the whole API in comments.</li>
+      <li>Change <span class="mono">choose(const State&amp; s)</span> to return a better <span class="mono">Move</span>.</li>
+      <li>Hit <b>⟳ Rebuild bots</b> up top (or rerun the start script / <span class="mono">python3 build.py</span>).</li>
+      <li>Fight it here — or copy the file to <span class="mono">bots/your_name.cpp</span> to enter the tournament.</li>
+    </ol>
+
+    <h2>The API you'll actually use</h2>
+    <pre class="mono code">Move choose(const State&amp; s) override {
+  s.turn                    // 1-based turn number
+  s.me.hand[ROCK]           // your cards left (PAPER, SCISSORS too)
+  s.me.coins                // your Crafticoins
+  s.opp.hand, s.opp.coins   // theirs — perfect information
+  s.hasHistory()            // false on turn 1
+  s.myLast(), s.oppLast()   // last turn's Moves
+  s.legalMoves()            // everything you can afford right now
+  s.next(mine, theirs)      // full one-turn simulation → State
+
+  return Move::play(ROCK);          // free
+  return Move::plus(PAPER);         // p+   1 coin
+  return Move::shift(ROCK, PAPER);  // r?p  1 coin
+  return Move::bomb(SCISSORS);      // s!   2 coins
+}</pre>
+
+    <h2>Command line</h2>
+    <pre class="mono code">python3 build.py                    # build engine + every bot (any OS)
+python3 build.py --test             # rules unit tests
+./build/arena play my_bot gambit    # one game, pretty-printed
+./build/arena match my_bot gambit -n 100
+./build/arena tournament --games 10
+./build/arena play my_bot gambit --json   # replay JSON (what this UI uses)
+# Windows: the binary is build\arena.exe — everything else is identical</pre>
+    <p class="fine">Deterministic reruns: add <span class="mono">--seed N</span>. Your bot's RNG (<span class="mono">rps::rng()</span>) is seeded by the arena.</p>
+
+    <h2>House rules the engine enforces</h2>
+    <ul class="fine-list">
+      <li>Costs are paid when you submit; the coin you earn this turn arrives after.</li>
+      <li><span class="mono">x+</span> only out-ranks the same effective shape — <span class="mono">p</span> still beats <span class="mono">r+</span>, and <span class="mono">r+</span> beats <span class="mono">p?r</span>.</li>
+      <li>A bomb explodes only on a loss — even bombs and upgraded cards die in the blast.</li>
+      <li>Both players eliminated on the same turn → draw. Turn 100 → most cards wins, equal is a draw.</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<div id="toast" class="mono" hidden></div>
+
+<dialog id="build-dialog">
+  <h3 id="build-title">Rebuilding…</h3>
+  <pre class="mono" id="build-out">running make…</pre>
+  <form method="dialog"><button class="primary">Close</button></form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
