@@ -401,7 +401,6 @@ static GameLog runGame(const BotRef& A, const BotRef& B, const Config& cfg) {
   bool bUp = pb.spawn(B.path, cfg.seed * 2 + 2);
 
   Player a, b;
-  std::mt19937 gameRng(cfg.seed * 7919u + 17u);  // drives the mod-5 burns
 
   auto finish = [&](char winner, const std::string& reason) {
     g.winner = winner;
@@ -498,7 +497,7 @@ static GameLog runGame(const BotRef& A, const BotRef& B, const Config& cfg) {
     tl.t = t;
     tl.sa = sa; tl.sb = sb;
     tl.a = aa; tl.b = ab;
-    tl.r = applyCombat(a, b, aa, ab, t, &gameRng);
+    tl.r = applyCombat(a, b, aa, ab, t);
     tl.aAfter = a; tl.bAfter = b;
     g.turns.push_back(tl);
 
@@ -820,7 +819,6 @@ static int runInteractive(const BotRef& bot, char humanSide, Config cfg) {
   Attack lastA, lastB;
   bool haveLast = false;
   Proc p;
-  std::mt19937 gameRng(cfg.seed * 7919u + 17u);
 
   auto endEvent = [&](char winner, const std::string& reason) {
     std::ostringstream o;
@@ -948,7 +946,7 @@ static int runInteractive(const BotRef& bot, char humanSide, Config cfg) {
     tl.sa = sa; tl.sb = sb;
     tl.a = humanSide == 'a' ? hAtk : bAtk;
     tl.b = humanSide == 'a' ? bAtk : hAtk;
-    tl.r = applyCombat(a, b, tl.a, tl.b, t, &gameRng);
+    tl.r = applyCombat(a, b, tl.a, tl.b, t);
     tl.aAfter = a; tl.bAfter = b;
     std::string tj = turnJson(tl);
     tj.insert(1, "\"type\":\"turn\",");

@@ -63,8 +63,10 @@ then both purchases are revealed. Purchases are **permanent**:
 (even if the card died). Bombs have no shape and break the chain. You can't
 spend this turn's income this turn.
 
-**⚠ Danger rounds:** every 5th turn (5, 10, 15…), the clash **loser burns one
-extra random card** — upgraded cards and bombs included. Ties and trades are safe.
+**⚠ Danger rounds:** every 5th turn (5, 10, 15…), the clash loser also burns
+their **cheapest card of the shape they just played** (none left → cheapest
+card overall, rock→paper→scissors order; only bombs left → a bomb). Ties and
+trades are safe. Fully deterministic — plan around the clock.
 
 **Winning:** opponent at 0 total cards (bombs count). Both at 0 → draw. At turn
 100, most total cards wins; equal is a draw.
@@ -141,7 +143,7 @@ seeded by the arena, so use it and your games stay reproducible (`--seed`).
 ./build/arena list                            # available bots
 ```
 
-Common flags: `--seed N` (reproducible games — including the danger-round burns),
+Common flags: `--seed N` (seeds the bots' `rng()` for reproducible games),
 `--time-ms N`, `--turns N`. On Windows the binary is `build\arena.exe`.
 
 ## Web UI
@@ -173,10 +175,9 @@ python3 build.py
 
 ## Under the hood
 
-- All rules live in **`sdk/rps.h`**, once — engine, tests, and bots share it, so
-  `s.next()` simulates exactly what the engine executes. (`State::next()` skips
-  the danger-round random burn so searches stay deterministic; the engine's own
-  RNG is seeded per game.)
+- All rules live in **`sdk/rps.h`**, once — engine, tests, and bots share it,
+  and the game is fully deterministic, so `s.next()` simulates **exactly** what
+  the engine executes, danger burns included. Search bots can trust it completely.
 - Bots are separate executables speaking a 4-line-per-turn text protocol:
 
   ```

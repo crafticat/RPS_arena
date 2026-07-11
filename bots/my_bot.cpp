@@ -12,8 +12,9 @@
 //    · different shapes: rock > scissors > paper > rock — tiers don't matter
 //    · bombs: trade with whatever they meet (both cards die, nobody "wins")
 //    · repeat your base shape two turns running: +2 Crafticoins
-//    · every 5th turn is a DANGER ROUND: the clash loser burns an extra
-//      random card (check s.isSpecialRound())
+//    · every 5th turn is a DANGER ROUND: the clash loser also burns their
+//      cheapest card of the shape they just played (s.isSpecialRound()).
+//      The game is fully deterministic — s.next() simulates it EXACTLY.
 //
 //  PRICES:  upgrade tier0→1: 2🪙 · higher tiers: 1🪙 · bomb: 5🪙 · card: 7🪙
 //

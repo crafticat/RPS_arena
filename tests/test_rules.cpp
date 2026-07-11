@@ -4,7 +4,6 @@
 #include "rps.h"
 
 #include <cstdio>
-#include <random>
 #include <string>
 
 using namespace rps;
@@ -100,10 +99,8 @@ static void testAttackValidation() {
   CHECK(!validateAttack(q, Attack::bombCard()).empty());      // no bomb owned
 }
 
-// non-special turn helper
 static TurnResult clashAt(Player& a, Player& b, Attack aa, Attack ab, int turn = 1) {
-  std::mt19937 rng(7);
-  return applyCombat(a, b, aa, ab, turn, &rng);
+  return applyCombat(a, b, aa, ab, turn);
 }
 
 static void testShapeTrumpsTier() {
@@ -190,24 +187,44 @@ static void testCoins() {
 }
 
 static void testSpecialRound() {
-  {  // on turns %5==0 the clash loser burns an extra random card
+  {  // on turns %5==0 the loser burns their cheapest card of the played shape
     Player a = P(), b = P();
     a.add(ROCK, 0, 1);
-    b.add(SCISSORS, 0, 4);
-    b.bombs = 1;                                // victims include bombs
-    TurnResult r = clashAt(a, b, Attack::card(ROCK, 0), Attack::card(SCISSORS, 0), 5);
+    b.add(SCISSORS, 0, 2);
+    b.add(SCISSORS, 3, 1);
+    b.bombs = 1;
+    TurnResult r = clashAt(a, b, Attack::card(ROCK, 0), Attack::card(SCISSORS, 3), 5);
     CHECK(r.special);
     CHECK(r.winner == 1);
-    CHECK(b.total() == 3);                      // played card + one extra gone
-    CHECK(!r.bSpecialLost.empty());
+    CHECK(r.bSpecialLost == "s");               // cheapest scissors, not the +3 or a bomb
+    CHECK(b.countAt(SCISSORS, 0) == 1 && b.total() == 2);
     CHECK(r.aSpecialLost.empty());
+  }
+  {  // none of the played shape left -> lowest tier overall (r→p→s order)
+    Player a = P(), b = P();
+    a.add(ROCK, 0, 1);
+    b.add(SCISSORS, 0, 1);                      // will be destroyed by the clash
+    b.add(PAPER, 2, 1);
+    b.add(ROCK, 2, 1);
+    TurnResult r = clashAt(a, b, Attack::card(ROCK, 0), Attack::card(SCISSORS, 0), 5);
+    CHECK(r.bSpecialLost == "r2");              // tie on tier: rock wins the r→p→s order
+    CHECK(b.total() == 1 && b.has(PAPER, 2));
+  }
+  {  // nothing but bombs left -> a bomb burns
+    Player a = P(), b = P();
+    a.add(ROCK, 0, 1);
+    b.add(SCISSORS, 0, 1);
+    b.bombs = 2;
+    TurnResult r = clashAt(a, b, Attack::card(ROCK, 0), Attack::card(SCISSORS, 0), 5);
+    CHECK(r.bSpecialLost == "!");
+    CHECK(b.bombs == 1 && b.total() == 1);
   }
   {  // same clash on a normal turn: only the played card dies
     Player a = P(), b = P();
     a.add(ROCK, 0, 1);
     b.add(SCISSORS, 0, 4);
     TurnResult r = clashAt(a, b, Attack::card(ROCK, 0), Attack::card(SCISSORS, 0), 4);
-    CHECK(!r.special && b.total() == 3 + 0);    // 4 - played(destroyed) = 3
+    CHECK(!r.special && b.total() == 3);        // 4 - played(destroyed)
   }
   {  // ties and bomb trades have no loser: no extra burn
     Player a = P(), b = P();
@@ -260,11 +277,12 @@ static void testStateNext() {
   CHECK(n.history.size() == 1);
   State n2 = n.next(Attack::card(ROCK, 0), Attack::card(SCISSORS, 0));
   CHECK(n2.me.coins == 2 && n2.opp.coins == 2);  // both combo'd (+2 each)
-  // simulation note: next() skips the mod-5 random burn by design
+  // next() is exact: it applies the danger burn too
   State s5 = s;
   s5.turn = 5;
   State n5 = s5.next(Attack::card(ROCK, 0), Attack::card(SCISSORS, 0));
-  CHECK(n5.opp.total() == 29);                   // only the played card died
+  CHECK(n5.opp.total() == 28);                   // played card + danger burn
+  CHECK(n5.opp.count(SCISSORS) == 8);            // the burn hit the played shape
 }
 
 static void testAdjudicate() {

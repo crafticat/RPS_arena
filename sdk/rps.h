@@ -4,8 +4,9 @@
 //  V2 in one breath: every turn has a SHOP phase (buy at most one thing,
 //  purchases are permanent, both purchases are revealed) and an ATTACK phase
 //  (simultaneous card clash). Upgrades stack on specific cards; bombs are
-//  kamikaze cards that trade 1-for-1; every 5th turn the clash loser burns
-//  an extra random card.
+//  kamikaze cards that trade 1-for-1; every 5th turn the clash loser also
+//  burns their cheapest card of the shape they just played. The whole game
+//  is deterministic — State::next() simulates the engine exactly.
 //
 //  This file is the single source of truth for the rules. The arena engine,
 //  the unit tests, and every bot include this same header, so what your bot
@@ -252,33 +253,42 @@ struct TurnResult {
 };
 
 namespace detail {
-// Uniform pick over every card instance (bombs included). Returns its token.
-inline std::string burnRandomCard(Player& p, std::mt19937& rng) {
-  int n = p.total();
-  if (n <= 0) return "";
-  std::uniform_int_distribution<int> d(0, n - 1);
-  int k = d(rng);
-  if (k < p.bombs) { p.bombs--; return "!"; }
-  k -= p.bombs;
-  for (int s = 0; s < 3; s++) {
-    for (const auto& [tier, cnt] : p.cards[s]) {
-      if (k < cnt) {
-        Attack tok = Attack::card(static_cast<Shape>(s), tier);
-        p.remove(static_cast<Shape>(s), tier);
-        return tok.str();
+// Deterministic danger-round burn: the loser's lowest-tier card of the shape
+// they just played; if none remain, the lowest-tier card overall (shapes in
+// rock→paper→scissors order); if only bombs remain, a bomb. Returns the token.
+inline std::string burnCard(Player& p, const Attack& played) {
+  if (!played.bomb) {
+    const auto& m = p.cards[played.shape];
+    for (const auto& [tier, cnt] : m) {
+      if (cnt > 0) {
+        std::string tok = Attack::card(played.shape, tier).str();
+        p.remove(played.shape, tier);
+        return tok;
       }
-      k -= cnt;
     }
   }
-  return "";  // unreachable
+  int bestShape = -1, bestTier = 0;
+  for (int s = 0; s < 3; s++)
+    for (const auto& [tier, cnt] : p.cards[s]) {
+      if (cnt <= 0) continue;
+      if (bestShape < 0 || tier < bestTier) { bestShape = s; bestTier = tier; }
+      break;  // maps are tier-sorted: the first live entry is this shape's lowest
+    }
+  if (bestShape >= 0) {
+    std::string tok = Attack::card(static_cast<Shape>(bestShape), bestTier).str();
+    p.remove(static_cast<Shape>(bestShape), bestTier);
+    return tok;
+  }
+  if (p.bombs > 0) { p.bombs--; return "!"; }
+  return "";
 }
 }  // namespace detail
 
 // Applies one attack phase. Both attacks must already be validated against
-// post-shop hands. `rng` drives the mod-5 burn; pass nullptr to skip it
-// (that's what State::next does — simulations stay deterministic).
+// post-shop hands. Fully deterministic — State::next() simulates the engine
+// EXACTLY, danger-round burns included.
 inline TurnResult applyCombat(Player& a, Player& b, const Attack& aa, const Attack& ab,
-                              int turn, std::mt19937* rng) {
+                              int turn) {
   TurnResult r;
   r.special = (turn % SPECIAL_EVERY == 0);
 
@@ -307,12 +317,13 @@ inline TurnResult applyCombat(Player& a, Player& b, const Attack& aa, const Atta
   if (!r.aDestroyed) a.add(aa.shape, aa.tier);
   if (!r.bDestroyed) b.add(ab.shape, ab.tier);
 
-  // danger round: the clash LOSER burns one extra random card (ties and bomb
-  // trades have no loser)
-  if (r.special && r.winner != 0 && rng) {
+  // danger round: the clash LOSER burns one extra card — their cheapest card
+  // of the shape they just played (ties and bomb trades have no loser)
+  if (r.special && r.winner != 0) {
     Player& loser = r.winner > 0 ? b : a;
+    const Attack& played = r.winner > 0 ? ab : aa;
     std::string& slot = r.winner > 0 ? r.bSpecialLost : r.aSpecialLost;
-    slot = detail::burnRandomCard(loser, *rng);
+    slot = detail::burnCard(loser, played);
   }
 
   // combo income: repeat your base shape two turns running -> +2.
@@ -391,11 +402,11 @@ struct State {
   }
 
   // Simulate the attack phase -> the state you'd face next turn.
-  // NOTE: the mod-5 random burn is SKIPPED here so search stays deterministic;
-  // on danger rounds the real engine may burn one extra card from the loser.
+  // This is EXACT: the whole game is deterministic, danger burns included,
+  // so search bots can trust it completely.
   State next(const Attack& mine, const Attack& theirs) const {
     State n = *this;
-    applyCombat(n.me, n.opp, mine, theirs, n.turn, nullptr);
+    applyCombat(n.me, n.opp, mine, theirs, n.turn);
     n.turn++;
     n.shopped = false;
     TurnRecord rec;
