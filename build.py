@@ -18,6 +18,11 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
+# Windows consoles often default to cp1252, which can't print ✓/✗.
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
 WIN = os.name == "nt"
 EXE = ".exe" if WIN else ""
 SDK = os.path.join("sdk", "rps.h")

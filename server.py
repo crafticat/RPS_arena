@@ -23,6 +23,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 
+# Windows consoles often default to cp1252, which can't print the banner glyphs.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 WIN = os.name == "nt"
 EXE = ".exe" if WIN else ""
 ARENA = os.path.join(ROOT, "build", "arena" + EXE)
