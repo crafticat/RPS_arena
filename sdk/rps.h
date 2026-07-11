@@ -1,9 +1,15 @@
 // ============================================================================
-//  rps.h — Advanced Tactical RPS: game rules + bot SDK (single header)
+//  rps.h — Advanced Tactical RPS V2: game rules + bot SDK (single header)
 //
-//  This file is the single source of truth for the game rules. The arena
-//  engine, the unit tests, and every bot all include this same header, so
-//  what your bot simulates is exactly what the engine executes.
+//  V2 in one breath: every turn has a SHOP phase (buy at most one thing,
+//  purchases are permanent, both purchases are revealed) and an ATTACK phase
+//  (simultaneous card clash). Upgrades stack on specific cards; bombs are
+//  kamikaze cards that trade 1-for-1; every 5th turn the clash loser burns
+//  an extra random card.
+//
+//  This file is the single source of truth for the rules. The arena engine,
+//  the unit tests, and every bot include this same header, so what your bot
+//  simulates is exactly what the engine executes.
 //
 //  Contestants: you only need the types marked with [BOT API] below.
 //  See README.md for the full guide.
@@ -13,6 +19,7 @@
 #include <array>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <random>
 #include <sstream>
 #include <string>
@@ -22,17 +29,18 @@
 namespace rps {
 
 // ---------------------------------------------------------------------------
-// Shapes & upgrades  [BOT API]
+// Shapes & prices  [BOT API]
 // ---------------------------------------------------------------------------
 
 enum Shape { ROCK = 0, PAPER = 1, SCISSORS = 2 };
 
-enum Upgrade {
-  NONE = 0,   // plain card, free
-  PLUS = 1,   // x+ : beats the standard version of itself   (1 Crafticoin)
-  SHIFT = 2,  // x? : fights disguised as another shape      (1 Crafticoin)
-  BOMB = 3,   // x! : if it loses, destroys the winner too   (2 Crafticoins)
-};
+constexpr int PRICE_BOMB = 5;      // kamikaze card: trades with whatever it meets
+constexpr int PRICE_CARD = 7;      // brand-new card of any shape (tier 0)
+constexpr int PRICE_UP_FIRST = 2;  // upgrading a tier-0 card
+constexpr int PRICE_UP_NEXT = 1;   // upgrading tier 1+, one tier at a time
+constexpr int COMBO_COINS = 2;     // repeat your base shape -> +2 Crafticoins
+constexpr int SPECIAL_EVERY = 5;   // every 5th turn: loser burns an extra card
+constexpr int START_CARDS = 10;    // per shape
 
 inline const char* shapeName(Shape s) {
   switch (s) {
@@ -55,129 +63,268 @@ inline Shape whatBeats(Shape s)   { return s == ROCK ? PAPER : s == PAPER ? SCIS
 inline Shape whatLosesTo(Shape s) { return s == ROCK ? SCISSORS : s == PAPER ? ROCK : PAPER; }
 inline bool beats(Shape a, Shape b) { return whatLosesTo(a) == b; }
 
-inline int upgradeCost(Upgrade u) { return u == NONE ? 0 : u == BOMB ? 2 : 1; }
+inline int upgradeCost(int currentTier) {
+  return currentTier == 0 ? PRICE_UP_FIRST : PRICE_UP_NEXT;
+}
 
 // ---------------------------------------------------------------------------
-// Moves  [BOT API]
+// Attack — the card you fight with this turn  [BOT API]
+// Notation: "r" (rock tier 0), "r3" (rock tier 3), "!" (bomb)
 // ---------------------------------------------------------------------------
-// Text notation used everywhere (CLI, protocol, replays, UI):
-//   "r"    plain rock          "p+"  upgraded paper
-//   "s!"   scissors bomb       "r?p" rock disguised as paper
 
-struct Move {
-  Shape base = ROCK;      // the real card taken from your hand
-  Upgrade upgrade = NONE;
-  Shape disguise = ROCK;  // meaningful only when upgrade == SHIFT
+struct Attack {
+  bool bomb = false;
+  Shape shape = ROCK;  // meaningless when bomb
+  int tier = 0;
 
-  // The shape this card fights as this turn.
-  Shape effective() const { return upgrade == SHIFT ? disguise : base; }
+  static Attack card(Shape s, int t = 0) { Attack a; a.shape = s; a.tier = t; return a; }
+  static Attack bombCard() { Attack a; a.bomb = true; return a; }
 
   std::string str() const {
-    std::string s(1, shapeChar(base));
-    if (upgrade == PLUS) s += '+';
-    else if (upgrade == BOMB) s += '!';
-    else if (upgrade == SHIFT) { s += '?'; s += shapeChar(disguise); }
+    if (bomb) return "!";
+    std::string s(1, shapeChar(shape));
+    if (tier > 0) s += std::to_string(tier);
     return s;
   }
 
-  static bool parse(const std::string& t, Move& out) {
-    if (t.empty() || t.size() > 3) return false;
-    Move m;
-    if (!shapeFromChar(t[0], m.base)) return false;
-    if (t.size() == 2) {
-      if (t[1] == '+') m.upgrade = PLUS;
-      else if (t[1] == '!') m.upgrade = BOMB;
-      else return false;
-    } else if (t.size() == 3) {
-      if (t[1] != '?') return false;
-      if (!shapeFromChar(t[2], m.disguise)) return false;
-      if (m.disguise == m.base) return false;  // must disguise as a DIFFERENT shape
-      m.upgrade = SHIFT;
+  static bool parse(const std::string& t, Attack& out) {
+    if (t.empty()) return false;
+    if (t == "!") { out = bombCard(); return true; }
+    Attack a;
+    if (!shapeFromChar(t[0], a.shape)) return false;
+    if (t.size() > 1) {
+      for (size_t i = 1; i < t.size(); i++)
+        if (t[i] < '0' || t[i] > '9') return false;
+      if (t.size() > 3) return false;  // tiers stay well below 3 digits
+      a.tier = std::atoi(t.c_str() + 1);
     }
-    out = m;
+    out = a;
     return true;
   }
+};
 
-  static Move play(Shape s) { Move m; m.base = s; return m; }
-  static Move plus(Shape s) { Move m; m.base = s; m.upgrade = PLUS; return m; }
-  static Move bomb(Shape s) { Move m; m.base = s; m.upgrade = BOMB; return m; }
-  static Move shift(Shape base, Shape as) {
-    Move m; m.base = base; m.upgrade = SHIFT; m.disguise = as; return m;
+// ---------------------------------------------------------------------------
+// Shop — at most ONE purchase per turn  [BOT API]
+// Notation: "-" nothing · "b" bomb (5) · "cr"/"cp"/"cs" new card (7)
+//           "ur2" upgrade one of your rock tier-2 cards to tier 3 (2 if
+//           tier 0, else 1)
+// ---------------------------------------------------------------------------
+
+struct Shop {
+  enum Kind { NONE = 0, CARD = 1, BOMB = 2, UPGRADE = 3 };
+  Kind kind = NONE;
+  Shape shape = ROCK;  // CARD: what to buy · UPGRADE: which card
+  int tier = 0;        // UPGRADE: the card's CURRENT tier
+
+  static Shop none() { return Shop{}; }
+  static Shop card(Shape s) { Shop x; x.kind = CARD; x.shape = s; return x; }
+  static Shop bomb() { Shop x; x.kind = BOMB; return x; }
+  static Shop upgrade(Shape s, int t) { Shop x; x.kind = UPGRADE; x.shape = s; x.tier = t; return x; }
+
+  int cost() const {
+    switch (kind) {
+      case CARD: return PRICE_CARD;
+      case BOMB: return PRICE_BOMB;
+      case UPGRADE: return upgradeCost(tier);
+      default: return 0;
+    }
+  }
+
+  std::string str() const {
+    switch (kind) {
+      case NONE: return "-";
+      case BOMB: return "b";
+      case CARD: return std::string("c") + shapeChar(shape);
+      default: return std::string("u") + shapeChar(shape) + std::to_string(tier);
+    }
+  }
+
+  static bool parse(const std::string& t, Shop& out) {
+    if (t == "-") { out = none(); return true; }
+    if (t == "b") { out = bomb(); return true; }
+    if (t.size() >= 2 && t[0] == 'c') {
+      Shape s;
+      if (t.size() != 2 || !shapeFromChar(t[1], s)) return false;
+      out = card(s);
+      return true;
+    }
+    if (t.size() >= 3 && t[0] == 'u') {
+      Shape s;
+      if (!shapeFromChar(t[1], s)) return false;
+      for (size_t i = 2; i < t.size(); i++)
+        if (t[i] < '0' || t[i] > '9') return false;
+      if (t.size() > 4) return false;
+      out = upgrade(s, std::atoi(t.c_str() + 2));
+      return true;
+    }
+    return false;
   }
 };
 
 // ---------------------------------------------------------------------------
 // One side of the game  [BOT API]
+// Your hand is a multiset of (shape, tier) cards plus a count of bombs.
 // ---------------------------------------------------------------------------
 
 struct Player {
-  std::array<int, 3> hand {{7, 7, 7}};  // cards remaining, indexed by Shape
-  int coins = 0;                        // Crafticoins
-  bool hasLast = false;                 // false only before the first turn
-  Shape lastBase = ROCK;                // BASE shape played last turn (disguises don't hide this)
+  // cards[shape] maps tier -> how many such cards you hold
+  std::array<std::map<int, int>, 3> cards;
+  int bombs = 0;
+  int coins = 0;
+  bool hasLast = false;   // false before your first non-bomb attack
+  Shape lastBase = ROCK;  // base shape of your previous attack (bombs reset this)
 
-  int total() const { return hand[0] + hand[1] + hand[2]; }
+  Player() { for (auto& m : cards) m[0] = START_CARDS; }
+
+  int count(Shape s) const {
+    int n = 0;
+    for (const auto& [t, c] : cards[s]) n += c;
+    return n;
+  }
+  int countAt(Shape s, int tier) const {
+    auto it = cards[s].find(tier);
+    return it == cards[s].end() ? 0 : it->second;
+  }
+  bool has(Shape s, int tier) const { return countAt(s, tier) > 0; }
+  int maxTier(Shape s) const {
+    int best = -1;
+    for (const auto& [t, c] : cards[s]) if (c > 0 && t > best) best = t;
+    return best;  // -1 when you have no cards of this shape
+  }
+  int total() const { return count(ROCK) + count(PAPER) + count(SCISSORS) + bombs; }
+
+  void add(Shape s, int tier, int n = 1) { cards[s][tier] += n; }
+  void remove(Shape s, int tier) {
+    auto it = cards[s].find(tier);
+    if (it != cards[s].end() && --it->second <= 0) cards[s].erase(it);
+  }
 };
 
-// Returns "" when the move is legal, otherwise a human-readable reason.
-inline std::string validateMove(const Player& p, const Move& m) {
-  if (m.upgrade == SHIFT && m.disguise == m.base)
-    return "disguise must be a different shape than the card itself";
-  if (p.hand[m.base] <= 0)
-    return std::string("no ") + shapeName(m.base) + " left in hand";
-  int cost = upgradeCost(m.upgrade);
-  if (p.coins < cost)
-    return "not enough Crafticoins (need " + std::to_string(cost) +
+// ---------------------------------------------------------------------------
+// Validation  [BOT API]  — "" when legal, otherwise the reason
+// ---------------------------------------------------------------------------
+
+inline std::string validateShop(const Player& p, const Shop& s) {
+  if (s.kind == Shop::NONE) return "";
+  if (s.kind == Shop::UPGRADE && !p.has(s.shape, s.tier))
+    return std::string("no ") + shapeName(s.shape) + " at tier " +
+           std::to_string(s.tier) + " to upgrade";
+  if (p.coins < s.cost())
+    return "not enough Crafticoins (need " + std::to_string(s.cost()) +
            ", have " + std::to_string(p.coins) + ")";
   return "";
 }
 
+inline std::string validateAttack(const Player& p, const Attack& a) {
+  if (a.bomb) {
+    if (p.bombs <= 0) return "no bombs in hand";
+    return "";
+  }
+  if (!p.has(a.shape, a.tier))
+    return std::string("no ") + shapeName(a.shape) + " at tier " +
+           std::to_string(a.tier) + " in hand";
+  return "";
+}
+
+// Purchases resolve before the attack phase — you may play what you just
+// bought or upgraded. Callers must validate first.
+inline void applyShop(Player& p, const Shop& s) {
+  p.coins -= s.cost();
+  switch (s.kind) {
+    case Shop::CARD: p.add(s.shape, 0); break;
+    case Shop::BOMB: p.bombs++; break;
+    case Shop::UPGRADE: p.remove(s.shape, s.tier); p.add(s.shape, s.tier + 1); break;
+    default: break;
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Turn resolution — THE rules  [BOT API: used via State::next]
+// Combat resolution — THE rules  [BOT API: used via State::next]
 // ---------------------------------------------------------------------------
 
 struct TurnResult {
-  int winner = 0;                        // +1 a won the clash, -1 b won, 0 tie
+  int winner = 0;              // +1 a won the clash, -1 b won, 0 tie or bomb trade
+  bool bombTrade = false;      // someone played a bomb: both played cards died
   bool aDestroyed = false, bDestroyed = false;
-  int aEarned = 0, bEarned = 0;          // Crafticoins earned this turn (0 or 1)
+  int aEarned = 0, bEarned = 0;              // combo Crafticoins this turn
+  bool special = false;                      // was this a mod-5 danger round?
+  std::string aSpecialLost, bSpecialLost;    // extra card burned ("r2", "!", "")
 };
 
-// Applies one simultaneous turn to both players. Moves must already be valid.
-// Order of operations: pay upgrade costs -> fight -> survivors return as their
-// base shape -> coin combos pay out (so this turn's coin can't fund this turn).
-inline TurnResult applyTurn(Player& a, Player& b, const Move& ma, const Move& mb) {
-  TurnResult r;
-  a.coins -= upgradeCost(ma.upgrade);
-  b.coins -= upgradeCost(mb.upgrade);
-  a.hand[ma.base]--;
-  b.hand[mb.base]--;
+namespace detail {
+// Uniform pick over every card instance (bombs included). Returns its token.
+inline std::string burnRandomCard(Player& p, std::mt19937& rng) {
+  int n = p.total();
+  if (n <= 0) return "";
+  std::uniform_int_distribution<int> d(0, n - 1);
+  int k = d(rng);
+  if (k < p.bombs) { p.bombs--; return "!"; }
+  k -= p.bombs;
+  for (int s = 0; s < 3; s++) {
+    for (const auto& [tier, cnt] : p.cards[s]) {
+      if (k < cnt) {
+        Attack tok = Attack::card(static_cast<Shape>(s), tier);
+        p.remove(static_cast<Shape>(s), tier);
+        return tok.str();
+      }
+      k -= cnt;
+    }
+  }
+  return "";  // unreachable
+}
+}  // namespace detail
 
-  Shape ea = ma.effective(), eb = mb.effective();
-  if (ea == eb) {
-    // Same effective shape: x+ beats plain x; x+ vs x+ is a normal tie.
-    bool pa = ma.upgrade == PLUS, pb = mb.upgrade == PLUS;
-    r.winner = (pa && !pb) ? +1 : (pb && !pa) ? -1 : 0;
+// Applies one attack phase. Both attacks must already be validated against
+// post-shop hands. `rng` drives the mod-5 burn; pass nullptr to skip it
+// (that's what State::next does — simulations stay deterministic).
+inline TurnResult applyCombat(Player& a, Player& b, const Attack& aa, const Attack& ab,
+                              int turn, std::mt19937* rng) {
+  TurnResult r;
+  r.special = (turn % SPECIAL_EVERY == 0);
+
+  // played cards leave the hands
+  if (aa.bomb) a.bombs--; else a.remove(aa.shape, aa.tier);
+  if (ab.bomb) b.bombs--; else b.remove(ab.shape, ab.tier);
+
+  if (aa.bomb || ab.bomb) {
+    // Bombs trade unconditionally: both played cards die, nobody wins/loses.
+    r.bombTrade = true;
+    r.aDestroyed = r.bDestroyed = true;
+  } else if (aa.shape == ab.shape) {
+    // Mirror: the tier ladder decides. Equal tiers tie.
+    r.winner = aa.tier > ab.tier ? +1 : ab.tier > aa.tier ? -1 : 0;
   } else {
-    r.winner = beats(ea, eb) ? +1 : -1;
+    // Different shapes: classic RPS — tiers never cross shapes.
+    r.winner = beats(aa.shape, ab.shape) ? +1 : -1;
   }
 
-  if (r.winner > 0) { r.bDestroyed = true; if (mb.upgrade == BOMB) r.aDestroyed = true; }
-  if (r.winner < 0) { r.aDestroyed = true; if (ma.upgrade == BOMB) r.bDestroyed = true; }
+  if (!r.bombTrade) {
+    if (r.winner > 0) r.bDestroyed = true;
+    if (r.winner < 0) r.aDestroyed = true;
+  }
 
-  if (!r.aDestroyed) a.hand[ma.base]++;  // survivors return as plain base cards
-  if (!r.bDestroyed) b.hand[mb.base]++;
+  // survivors return, keeping their tier (upgrades are permanent)
+  if (!r.aDestroyed) a.add(aa.shape, aa.tier);
+  if (!r.bDestroyed) b.add(ab.shape, ab.tier);
 
-  // Coin combo: base shape matches the base shape of the previous turn.
-  // Pays out even if the card just died.
-  if (a.hasLast && a.lastBase == ma.base) { a.coins++; r.aEarned = 1; }
-  if (b.hasLast && b.lastBase == mb.base) { b.coins++; r.bEarned = 1; }
-  a.hasLast = b.hasLast = true;
-  a.lastBase = ma.base;
-  b.lastBase = mb.base;
+  // danger round: the clash LOSER burns one extra random card (ties and bomb
+  // trades have no loser)
+  if (r.special && r.winner != 0 && rng) {
+    Player& loser = r.winner > 0 ? b : a;
+    std::string& slot = r.winner > 0 ? r.bSpecialLost : r.aSpecialLost;
+    slot = detail::burnRandomCard(loser, *rng);
+  }
+
+  // combo income: repeat your base shape two turns running -> +2.
+  // Pays even if your card just died. Bombs have no shape and break the chain.
+  if (!aa.bomb && a.hasLast && a.lastBase == aa.shape) { a.coins += COMBO_COINS; r.aEarned = COMBO_COINS; }
+  if (!ab.bomb && b.hasLast && b.lastBase == ab.shape) { b.coins += COMBO_COINS; r.bEarned = COMBO_COINS; }
+  if (aa.bomb) { a.hasLast = false; } else { a.hasLast = true; a.lastBase = aa.shape; }
+  if (ab.bomb) { b.hasLast = false; } else { b.hasLast = true; b.lastBase = ab.shape; }
   return r;
 }
 
-// Turn-limit adjudication: most total cards wins ('a'/'b'), equal is a draw ('d').
+// Turn-limit adjudication: most total cards (bombs count) wins; equal = draw.
 inline char adjudicateByCards(const Player& a, const Player& b) {
   if (a.total() > b.total()) return 'a';
   if (b.total() > a.total()) return 'b';
@@ -188,39 +335,75 @@ inline char adjudicateByCards(const Player& a, const Player& b) {
 // Full game state from YOUR bot's perspective  [BOT API]
 // ---------------------------------------------------------------------------
 
+struct TurnRecord {
+  Attack myAtk, oppAtk;
+  Shop myShop, oppShop;
+};
+
 struct State {
-  int turn = 1;      // 1-based; the turn you are currently choosing a move for
+  int turn = 1;      // 1-based; the turn you are currently playing
   Player me, opp;    // perfect information: you see everything
-  std::vector<std::pair<Move, Move>> history;  // (my move, opp move) per past turn
+
+  // During chooseAttack(), this turn's revealed purchases:
+  bool shopped = false;      // true once the shop phase resolved
+  Shop myShopNow, oppShopNow;
+
+  std::vector<TurnRecord> history;  // completed turns, oldest first
 
   bool hasHistory() const { return !history.empty(); }
-  Move myLast() const { return history.back().first; }
-  Move oppLast() const { return history.back().second; }
+  Attack myLast() const { return history.back().myAtk; }
+  Attack oppLast() const { return history.back().oppAtk; }
+  bool isSpecialRound() const { return turn % SPECIAL_EVERY == 0; }
 
-  // Every legal move you can make right now (base plays + affordable upgrades).
-  std::vector<Move> legalMoves() const {
-    std::vector<Move> v;
-    for (int i = 0; i < 3; i++) {
-      Shape s = static_cast<Shape>(i);
-      if (me.hand[i] <= 0) continue;
-      v.push_back(Move::play(s));
-      if (me.coins >= 1) {
-        v.push_back(Move::plus(s));
-        for (int d = 0; d < 3; d++)
-          if (d != i) v.push_back(Move::shift(s, static_cast<Shape>(d)));
-      }
-      if (me.coins >= 2) v.push_back(Move::bomb(s));
-    }
+  // Every legal purchase right now (always includes Shop::none()).
+  std::vector<Shop> legalShops() const {
+    std::vector<Shop> v;
+    v.push_back(Shop::none());
+    for (int s = 0; s < 3; s++)
+      for (const auto& [tier, cnt] : me.cards[s])
+        if (cnt > 0 && me.coins >= upgradeCost(tier))
+          v.push_back(Shop::upgrade(static_cast<Shape>(s), tier));
+    if (me.coins >= PRICE_BOMB) v.push_back(Shop::bomb());
+    if (me.coins >= PRICE_CARD)
+      for (int s = 0; s < 3; s++) v.push_back(Shop::card(static_cast<Shape>(s)));
     return v;
   }
 
-  // Simulate one turn: what the state looks like if I play `mine` and the
-  // opponent plays `theirs`. Perfect for search bots (minimax/MCTS).
-  State next(const Move& mine, const Move& theirs) const {
+  // Every card you can attack with right now.
+  std::vector<Attack> legalAttacks() const {
+    std::vector<Attack> v;
+    for (int s = 0; s < 3; s++)
+      for (const auto& [tier, cnt] : me.cards[s])
+        if (cnt > 0) v.push_back(Attack::card(static_cast<Shape>(s), tier));
+    if (me.bombs > 0) v.push_back(Attack::bombCard());
+    return v;
+  }
+
+  // Simulate the shop phase (both purchases must be legal).
+  State afterShops(const Shop& mine, const Shop& theirs) const {
     State n = *this;
-    applyTurn(n.me, n.opp, mine, theirs);
+    applyShop(n.me, mine);
+    applyShop(n.opp, theirs);
+    n.shopped = true;
+    n.myShopNow = mine;
+    n.oppShopNow = theirs;
+    return n;
+  }
+
+  // Simulate the attack phase -> the state you'd face next turn.
+  // NOTE: the mod-5 random burn is SKIPPED here so search stays deterministic;
+  // on danger rounds the real engine may burn one extra card from the loser.
+  State next(const Attack& mine, const Attack& theirs) const {
+    State n = *this;
+    applyCombat(n.me, n.opp, mine, theirs, n.turn, nullptr);
     n.turn++;
-    n.history.emplace_back(mine, theirs);
+    n.shopped = false;
+    TurnRecord rec;
+    rec.myAtk = mine;
+    rec.oppAtk = theirs;
+    rec.myShop = shopped ? myShopNow : Shop::none();
+    rec.oppShop = shopped ? oppShopNow : Shop::none();
+    n.history.push_back(rec);
     return n;
   }
 };
@@ -233,8 +416,12 @@ class Bot {
  public:
   virtual ~Bot() = default;
   virtual std::string name() { return "unnamed"; }
-  // Called once per turn. Return any legal move — see State::legalMoves().
-  virtual Move choose(const State& s) = 0;
+
+  // Shop phase: buy at most one thing (default: save your coins).
+  virtual Shop chooseShop(const State& s) { (void)s; return Shop::none(); }
+
+  // Attack phase: s.myShopNow / s.oppShopNow hold this turn's purchases.
+  virtual Attack chooseAttack(const State& s) = 0;
 };
 
 // Shared RNG, seeded by the arena (env RPS_SEED) so games are reproducible.
@@ -253,41 +440,112 @@ inline std::mt19937& rng() {
 // ---------------------------------------------------------------------------
 
 namespace detail {
-inline bool parseMoveToken(const std::string& tok, Move& out, bool& present) {
-  if (tok == "-") { present = false; return true; }
-  present = true;
-  return Move::parse(tok, out);
+
+// "0:9,2:1" -> {0:9, 2:1};  "-" -> empty
+inline void parseTierList(const std::string& tok, std::map<int, int>& out) {
+  out.clear();
+  if (tok == "-") return;
+  std::istringstream in(tok);
+  std::string part;
+  while (std::getline(in, part, ',')) {
+    size_t colon = part.find(':');
+    if (colon == std::string::npos) continue;
+    out[std::atoi(part.substr(0, colon).c_str())] = std::atoi(part.substr(colon + 1).c_str());
+  }
 }
+
+inline std::string tierListStr(const std::map<int, int>& m) {
+  std::string s;
+  for (const auto& [t, c] : m) {
+    if (c <= 0) continue;
+    if (!s.empty()) s += ",";
+    s += std::to_string(t) + ":" + std::to_string(c);
+  }
+  return s.empty() ? "-" : s;
+}
+
+inline void parseSide(std::istringstream& in, Player& p) {
+  std::string r, pp, ss;
+  in >> p.coins >> p.bombs >> r >> pp >> ss;
+  parseTierList(r, p.cards[0]);
+  parseTierList(pp, p.cards[1]);
+  parseTierList(ss, p.cards[2]);
+}
+
 }  // namespace detail
 
 inline int runBot(Bot& bot) {
   std::string line;
-  std::vector<std::pair<Move, Move>> history;
+  std::vector<TurnRecord> history;
+  bool havePending = false;
+  TurnRecord pending;  // filled across the two phases of the current turn
+
   while (std::getline(std::cin, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
     std::istringstream in(line);
     std::string cmd;
     in >> cmd;
+
     if (cmd == "init") {
       std::cout << "name " << bot.name() << "\n" << std::flush;
+
     } else if (cmd == "state") {
       State s;
       std::string kw, myLastTok, oppLastTok;
-      in >> kw >> s.turn;                                            // turn <t>
-      in >> kw >> s.me.hand[0] >> s.me.hand[1] >> s.me.hand[2] >> s.me.coins;    // my ...
-      in >> kw >> s.opp.hand[0] >> s.opp.hand[1] >> s.opp.hand[2] >> s.opp.coins; // opp ...
-      in >> kw >> myLastTok >> kw >> oppLastTok;                     // mylast X opplast Y
-      Move myLast, oppLast;
-      bool haveMine = false, haveTheirs = false;
-      detail::parseMoveToken(myLastTok, myLast, haveMine);
-      detail::parseMoveToken(oppLastTok, oppLast, haveTheirs);
-      if (haveMine && haveTheirs) history.emplace_back(myLast, oppLast);
+      in >> kw >> s.turn;             // turn <t>
+      in >> kw;                       // my
+      detail::parseSide(in, s.me);
+      in >> kw;                       // opp
+      detail::parseSide(in, s.opp);
+      in >> kw >> myLastTok >> kw >> oppLastTok;
+
+      // completed-turn bookkeeping: opp's attack arrives with the next state
+      if (havePending && oppLastTok != "-") {
+        Attack theirs;
+        if (Attack::parse(oppLastTok, theirs)) {
+          pending.oppAtk = theirs;
+          history.push_back(pending);
+        }
+        havePending = false;
+      }
       s.history = history;
-      s.me.hasLast = haveMine;
-      if (haveMine) s.me.lastBase = myLast.base;
-      s.opp.hasLast = haveTheirs;
-      if (haveTheirs) s.opp.lastBase = oppLast.base;
-      Move m = bot.choose(s);
-      std::cout << "move " << m.str() << "\n" << std::flush;
+      Attack myLast;
+      if (myLastTok != "-" && Attack::parse(myLastTok, myLast) && !myLast.bomb) {
+        s.me.hasLast = true;
+        s.me.lastBase = myLast.shape;
+      }
+      Attack oppLast;
+      if (oppLastTok != "-" && Attack::parse(oppLastTok, oppLast) && !oppLast.bomb) {
+        s.opp.hasLast = true;
+        s.opp.lastBase = oppLast.shape;
+      }
+
+      // ---- shop phase
+      Shop myShop = bot.chooseShop(s);
+      std::cout << "shop " << myShop.str() << "\n" << std::flush;
+
+      // ---- reveal
+      std::string reveal;
+      if (!std::getline(std::cin, reveal)) break;
+      while (!reveal.empty() && (reveal.back() == '\r' || reveal.back() == ' ')) reveal.pop_back();
+      std::istringstream rin(reveal);
+      std::string rcmd, rkw, mineTok, theirsTok;
+      rin >> rcmd;
+      if (rcmd == "end") break;
+      rin >> rkw >> mineTok >> rkw >> theirsTok;  // shopped my <tok> opp <tok>
+      Shop mine, theirs;
+      Shop::parse(mineTok, mine);
+      Shop::parse(theirsTok, theirs);
+      State s2 = s.afterShops(mine, theirs);
+
+      // ---- attack phase
+      Attack atk = bot.chooseAttack(s2);
+      std::cout << "attack " << atk.str() << "\n" << std::flush;
+      pending.myAtk = atk;
+      pending.myShop = mine;
+      pending.oppShop = theirs;
+      havePending = true;
+
     } else if (cmd == "end") {
       break;
     }
@@ -295,7 +553,7 @@ inline int runBot(Bot& bot) {
   return 0;
 }
 
-// Put this at the bottom of your bot file:  RPS_MAIN(MyBot)
+// Put this at the bottom of your bot file:  RPS_MAIN(BotClass)
 #define RPS_MAIN(BotClass) \
   int main() {             \
     BotClass rpsBotInstance; \

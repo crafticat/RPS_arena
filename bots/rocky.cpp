@@ -1,15 +1,16 @@
-// Rocky — the training dummy. Throws rock until it runs out.
+// Rocky — the training dummy. Throws its cheapest rock, never shops.
 // The bot every contestant should beat within the first hour.
 #include "rps.h"
 
 struct Rocky : rps::Bot {
   std::string name() override { return "Rocky"; }
 
-  rps::Move choose(const rps::State& s) override {
+  rps::Attack chooseAttack(const rps::State& s) override {
     using namespace rps;
-    if (s.me.hand[ROCK] > 0) return Move::play(ROCK);
-    if (s.me.hand[PAPER] > 0) return Move::play(PAPER);
-    return Move::play(SCISSORS);
+    for (Shape sh : {ROCK, PAPER, SCISSORS})
+      for (const auto& [tier, cnt] : s.me.cards[sh])
+        if (cnt > 0) return Attack::card(sh, tier);   // lowest tier first
+    return Attack::bombCard();  // only bombs left (can't happen for Rocky)
   }
 };
 

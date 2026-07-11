@@ -1,9 +1,12 @@
 // ============================================================================
-//  arena.cpp — match runner for Advanced Tactical RPS
+//  arena.cpp — match runner for Advanced Tactical RPS V2
 //
 //  Bots are separate executables speaking a line protocol on stdin/stdout
-//  (see sdk/rps.h). The arena spawns them, enforces per-move time limits,
-//  and turns crashes / hangs / illegal moves into clean forfeits.
+//  (see sdk/rps.h). Every turn has two exchanges:
+//      -> state ...            <- shop <tok>
+//      -> shopped my X opp Y   <- attack <tok>
+//  The arena enforces per-phase time limits and turns crashes / hangs /
+//  illegal tokens into clean forfeits.
 //
 //  Modes:
 //    arena play <botA> <botB>            one game (pretty text, or --json)
@@ -38,7 +41,6 @@
 #include <vector>
 
 namespace fs = std::filesystem;
-
 using namespace rps;
 
 // ---------------------------------------------------------------- utilities
@@ -71,11 +73,6 @@ static std::string jesc(const std::string& s) {
   return o;
 }
 
-static std::string arr3(const std::array<int, 3>& h) {
-  return "[" + std::to_string(h[0]) + "," + std::to_string(h[1]) + "," +
-         std::to_string(h[2]) + "]";
-}
-
 static const char* shapeEmoji(Shape s) {
   switch (s) {
     case ROCK: return "🪨";
@@ -84,11 +81,10 @@ static const char* shapeEmoji(Shape s) {
   }
 }
 
-static std::string moveEmoji(const Move& m) {
-  std::string s = shapeEmoji(m.base);
-  if (m.upgrade == PLUS) s += "+";
-  else if (m.upgrade == BOMB) s += "💣";
-  else if (m.upgrade == SHIFT) { s += "→"; s += shapeEmoji(m.disguise); }
+static std::string attackEmoji(const Attack& a) {
+  if (a.bomb) return "💣";
+  std::string s = shapeEmoji(a.shape);
+  if (a.tier > 0) s += "+" + std::to_string(a.tier);
   return s;
 }
 
@@ -183,8 +179,7 @@ struct Proc {
         continue;
       }
       if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
-        // exited and the pipe is drained
-        dead = true;
+        dead = true;  // exited and the pipe is drained
         return false;
       }
       if (nowMs() >= deadline) return false;  // timeout
@@ -306,7 +301,7 @@ struct Proc {
 // ------------------------------------------------------------------- config
 
 struct Config {
-  int timeMs = 300;    // per-move budget advertised to bots
+  int timeMs = 300;    // per-PHASE budget advertised to bots
   int graceMs = 50;    // scheduling slack added on top before forfeiting
   int initMs = 2000;   // budget for startup + name reply
   int maxTurns = 100;
@@ -315,7 +310,7 @@ struct Config {
 };
 
 struct BotRef {
-  std::string id;    // basename, e.g. "gambit" — canonical identity everywhere
+  std::string id;    // bare name, e.g. "gambit" — canonical identity everywhere
   std::string path;  // executable path
 };
 
@@ -323,15 +318,15 @@ struct BotRef {
 
 struct TurnLog {
   int t = 0;
-  Move a, b;
+  Shop sa, sb;
+  Attack a, b;
   TurnResult r;
-  std::array<int, 3> ah{}, bh{};
-  int ac = 0, bc = 0;
+  Player aAfter, bAfter;
 };
 
 struct GameLog {
   BotRef A, B;
-  std::string aDisp, bDisp;  // self-reported display names
+  std::string aDisp, bDisp;
   std::vector<TurnLog> turns;
   char winner = 'd';         // 'a' | 'b' | 'd'
   std::string reason;
@@ -343,52 +338,53 @@ struct GameLog {
 
 // ----------------------------------------------------------------- protocol
 
+static std::string sideStateTok(const Player& p) {
+  return std::to_string(p.coins) + " " + std::to_string(p.bombs) + " " +
+         detail::tierListStr(p.cards[0]) + " " + detail::tierListStr(p.cards[1]) + " " +
+         detail::tierListStr(p.cards[2]);
+}
+
 static std::string stateLine(int turn, const Player& me, const Player& opp,
-                             const Move* myLast, const Move* oppLast) {
+                             const Attack* myLast, const Attack* oppLast) {
   std::ostringstream o;
   o << "state turn " << turn
-    << " my " << me.hand[0] << " " << me.hand[1] << " " << me.hand[2] << " " << me.coins
-    << " opp " << opp.hand[0] << " " << opp.hand[1] << " " << opp.hand[2] << " " << opp.coins
+    << " my " << sideStateTok(me)
+    << " opp " << sideStateTok(opp)
     << " mylast " << (myLast ? myLast->str() : "-")
     << " opplast " << (oppLast ? oppLast->str() : "-");
   return o.str();
 }
 
-// Failure kinds a bot can produce on its half of a turn.
 struct SideFailure {
   bool failed = false;
   std::string why;
 };
 
-static SideFailure readMove(Proc& p, long long deadline, const Player& view, Move& out) {
+// Reads "<keyword> <token>" within the deadline; parse+validate via callback.
+template <typename ParseValidate>
+static SideFailure readPhase(Proc& p, long long deadline, const char* keyword,
+                             ParseValidate pv) {
   SideFailure f;
   std::string line;
   long long remain = deadline - nowMs();
   if (remain < 0) remain = 0;
   if (!p.readLine(line, static_cast<int>(remain))) {
     f.failed = true;
-    f.why = p.dead ? "crashed" : "timeout";
+    f.why = p.dead ? "crashed" : std::string("timeout (") + keyword + " phase)";
     return f;
   }
-  if (line.rfind("move ", 0) != 0) {
+  std::string prefix = std::string(keyword) + " ";
+  if (line.rfind(prefix, 0) != 0) {
     f.failed = true;
-    f.why = "bad reply (expected 'move <spec>', got '" + line.substr(0, 40) + "')";
+    f.why = "bad reply (expected '" + std::string(keyword) + " <tok>', got '" +
+            line.substr(0, 40) + "')";
     return f;
   }
-  std::string spec = line.substr(5);
-  Move m;
-  if (!Move::parse(spec, m)) {
+  std::string err = pv(line.substr(prefix.size()));
+  if (!err.empty()) {
     f.failed = true;
-    f.why = "unparseable move '" + spec.substr(0, 20) + "'";
-    return f;
+    f.why = err;
   }
-  std::string bad = validateMove(view, m);
-  if (!bad.empty()) {
-    f.failed = true;
-    f.why = "illegal move " + m.str() + " (" + bad + ")";
-    return f;
-  }
-  out = m;
   return f;
 }
 
@@ -405,6 +401,8 @@ static GameLog runGame(const BotRef& A, const BotRef& B, const Config& cfg) {
   bool bUp = pb.spawn(B.path, cfg.seed * 2 + 2);
 
   Player a, b;
+  std::mt19937 gameRng(cfg.seed * 7919u + 17u);  // drives the mod-5 burns
+
   auto finish = [&](char winner, const std::string& reason) {
     g.winner = winner;
     g.reason = reason;
@@ -449,18 +447,48 @@ static GameLog runGame(const BotRef& A, const BotRef& B, const Config& cfg) {
     if (lb.rfind("name ", 0) == 0) g.bDisp = lb.substr(5, 32);
   }
 
-  Move lastA, lastB;
+  Attack lastA, lastB;
   bool haveLast = false;
 
   for (int t = 1; t <= cfg.maxTurns; t++) {
     pa.writeLine(stateLine(t, a, b, haveLast ? &lastA : nullptr, haveLast ? &lastB : nullptr));
     pb.writeLine(stateLine(t, b, a, haveLast ? &lastB : nullptr, haveLast ? &lastA : nullptr));
 
+    // ---- shop phase (simultaneous)
     long long deadline = nowMs() + cfg.timeMs + cfg.graceMs;
-    Move ma, mb;
-    SideFailure fa = readMove(pa, deadline, a, ma);
-    SideFailure fb = readMove(pb, deadline, b, mb);
+    Shop sa, sb;
+    SideFailure fa = readPhase(pa, deadline, "shop", [&](const std::string& tok) {
+      if (!Shop::parse(tok, sa)) return "unparseable shop '" + tok.substr(0, 20) + "'";
+      std::string bad = validateShop(a, sa);
+      return bad.empty() ? std::string() : "illegal shop " + sa.str() + " (" + bad + ")";
+    });
+    SideFailure fb = readPhase(pb, deadline, "shop", [&](const std::string& tok) {
+      if (!Shop::parse(tok, sb)) return "unparseable shop '" + tok.substr(0, 20) + "'";
+      std::string bad = validateShop(b, sb);
+      return bad.empty() ? std::string() : "illegal shop " + sb.str() + " (" + bad + ")";
+    });
+    if (fa.failed || fb.failed) {
+      forfeit(fa.failed && fb.failed ? 'x' : (fa.failed ? 'a' : 'b'), fa.why, fb.why);
+      return g;
+    }
+    applyShop(a, sa);
+    applyShop(b, sb);
+    pa.writeLine("shopped my " + sa.str() + " opp " + sb.str());
+    pb.writeLine("shopped my " + sb.str() + " opp " + sa.str());
 
+    // ---- attack phase (simultaneous)
+    deadline = nowMs() + cfg.timeMs + cfg.graceMs;
+    Attack aa, ab;
+    fa = readPhase(pa, deadline, "attack", [&](const std::string& tok) {
+      if (!Attack::parse(tok, aa)) return "unparseable attack '" + tok.substr(0, 20) + "'";
+      std::string bad = validateAttack(a, aa);
+      return bad.empty() ? std::string() : "illegal attack " + aa.str() + " (" + bad + ")";
+    });
+    fb = readPhase(pb, deadline, "attack", [&](const std::string& tok) {
+      if (!Attack::parse(tok, ab)) return "unparseable attack '" + tok.substr(0, 20) + "'";
+      std::string bad = validateAttack(b, ab);
+      return bad.empty() ? std::string() : "illegal attack " + ab.str() + " (" + bad + ")";
+    });
     if (fa.failed || fb.failed) {
       forfeit(fa.failed && fb.failed ? 'x' : (fa.failed ? 'a' : 'b'), fa.why, fb.why);
       return g;
@@ -468,14 +496,13 @@ static GameLog runGame(const BotRef& A, const BotRef& B, const Config& cfg) {
 
     TurnLog tl;
     tl.t = t;
-    tl.a = ma;
-    tl.b = mb;
-    tl.r = applyTurn(a, b, ma, mb);
-    tl.ah = a.hand; tl.bh = b.hand;
-    tl.ac = a.coins; tl.bc = b.coins;
+    tl.sa = sa; tl.sb = sb;
+    tl.a = aa; tl.b = ab;
+    tl.r = applyCombat(a, b, aa, ab, t, &gameRng);
+    tl.aAfter = a; tl.bAfter = b;
     g.turns.push_back(tl);
 
-    lastA = ma; lastB = mb; haveLast = true;
+    lastA = aa; lastB = ab; haveLast = true;
 
     bool aOut = a.total() == 0, bOut = b.total() == 0;
     if (aOut || bOut) {
@@ -491,16 +518,44 @@ static GameLog runGame(const BotRef& A, const BotRef& B, const Config& cfg) {
 
 // ------------------------------------------------------------- JSON output
 
-static std::string turnJson(const TurnLog& t) {
+static std::string tierPairsJson(const std::map<int, int>& m) {
+  std::string s = "[";
+  bool first = true;
+  for (const auto& [t, c] : m) {
+    if (c <= 0) continue;
+    if (!first) s += ",";
+    first = false;
+    s += "[" + std::to_string(t) + "," + std::to_string(c) + "]";
+  }
+  return s + "]";
+}
+
+static std::string sideJson(const Player& p) {
   std::ostringstream o;
-  o << "{\"t\":" << t.t
-    << ",\"a\":{\"mv\":\"" << t.a.str() << "\",\"earned\":" << t.r.aEarned
-    << ",\"destroyed\":" << (t.r.aDestroyed ? "true" : "false") << "}"
-    << ",\"b\":{\"mv\":\"" << t.b.str() << "\",\"earned\":" << t.r.bEarned
-    << ",\"destroyed\":" << (t.r.bDestroyed ? "true" : "false") << "}"
-    << ",\"win\":\"" << (t.r.winner > 0 ? "a" : t.r.winner < 0 ? "b" : "tie") << "\""
-    << ",\"after\":{\"ah\":" << arr3(t.ah) << ",\"bh\":" << arr3(t.bh)
-    << ",\"ac\":" << t.ac << ",\"bc\":" << t.bc << "}}";
+  o << "{\"coins\":" << p.coins << ",\"bombs\":" << p.bombs
+    << ",\"r\":" << tierPairsJson(p.cards[0])
+    << ",\"p\":" << tierPairsJson(p.cards[1])
+    << ",\"s\":" << tierPairsJson(p.cards[2])
+    << ",\"total\":" << p.total() << "}";
+  return o.str();
+}
+
+static std::string turnJson(const TurnLog& t) {
+  auto side = [](const Shop& shop, const Attack& atk, int earned, bool destroyed,
+                 const std::string& lost) {
+    std::ostringstream o;
+    o << "{\"shop\":\"" << shop.str() << "\",\"mv\":\"" << atk.str()
+      << "\",\"earned\":" << earned << ",\"destroyed\":" << (destroyed ? "true" : "false")
+      << ",\"lost\":" << (lost.empty() ? "null" : "\"" + lost + "\"") << "}";
+    return o.str();
+  };
+  std::ostringstream o;
+  o << "{\"t\":" << t.t << ",\"special\":" << (t.r.special ? "true" : "false")
+    << ",\"a\":" << side(t.sa, t.a, t.r.aEarned, t.r.aDestroyed, t.r.aSpecialLost)
+    << ",\"b\":" << side(t.sb, t.b, t.r.bEarned, t.r.bDestroyed, t.r.bSpecialLost)
+    << ",\"win\":\""
+    << (t.r.bombTrade ? "trade" : t.r.winner > 0 ? "a" : t.r.winner < 0 ? "b" : "tie")
+    << "\",\"after\":{\"a\":" << sideJson(t.aAfter) << ",\"b\":" << sideJson(t.bAfter) << "}}";
   return o.str();
 }
 
@@ -519,8 +574,7 @@ static std::string gameJson(const GameLog& g) {
   } else {
     o << ",\"forfeit\":null";
   }
-  o << ",\"final\":{\"ah\":" << arr3(g.finalA.hand) << ",\"bh\":" << arr3(g.finalB.hand)
-    << ",\"ac\":" << g.finalA.coins << ",\"bc\":" << g.finalB.coins << "}";
+  o << ",\"final\":{\"a\":" << sideJson(g.finalA) << ",\"b\":" << sideJson(g.finalB) << "}";
   o << ",\"turns\":[";
   for (size_t i = 0; i < g.turns.size(); i++) {
     if (i) o << ",";
@@ -536,12 +590,20 @@ static void printGame(const GameLog& g) {
   std::printf("⚔️  %s (%s)  vs  %s (%s)   [seed %u]\n\n",
               g.A.id.c_str(), g.aDisp.c_str(), g.B.id.c_str(), g.bDisp.c_str(), g.seed);
   for (const TurnLog& t : g.turns) {
-    const char* res = t.r.winner > 0 ? "A wins " : t.r.winner < 0 ? "B wins " : "tie    ";
-    std::printf("turn %3d:  %-14s vs %-14s → %s | A:%2d🃏 %d🪙   B:%2d🃏 %d🪙%s%s\n",
-                t.t, moveEmoji(t.a).c_str(), moveEmoji(t.b).c_str(), res,
-                t.ah[0] + t.ah[1] + t.ah[2], t.ac,
-                t.bh[0] + t.bh[1] + t.bh[2], t.bc,
-                t.r.aEarned ? "  A+🪙" : "", t.r.bEarned ? "  B+🪙" : "");
+    const char* res = t.r.bombTrade ? "trade  "
+                      : t.r.winner > 0 ? "A wins "
+                      : t.r.winner < 0 ? "B wins " : "tie    ";
+    std::string shops;
+    if (t.sa.kind != Shop::NONE || t.sb.kind != Shop::NONE)
+      shops = "  [buy " + t.sa.str() + "|" + t.sb.str() + "]";
+    std::string burns;
+    if (!t.r.aSpecialLost.empty()) burns += "  A burns " + t.r.aSpecialLost;
+    if (!t.r.bSpecialLost.empty()) burns += "  B burns " + t.r.bSpecialLost;
+    std::printf("turn %3d%s %-12s vs %-12s → %s | A:%2d🃏 %2d🪙  B:%2d🃏 %2d🪙%s%s\n",
+                t.t, t.r.special ? "⚠" : ":", attackEmoji(t.a).c_str(),
+                attackEmoji(t.b).c_str(), res,
+                t.aAfter.total(), t.aAfter.coins, t.bAfter.total(), t.bAfter.coins,
+                shops.c_str(), burns.c_str());
   }
   std::printf("\n");
   if (g.winner == 'd') {
@@ -579,7 +641,6 @@ static std::vector<BotRef> discoverBots(const std::string& dir = "build/bots") {
     std::string name = e.path().filename().string();
     if (name.empty() || name[0] == '.') continue;
     if (!runnable(e.path())) continue;
-    // the id is the bare bot name: "gambit", never "gambit.exe"
     out.push_back({e.path().stem().string(), e.path().string()});
   }
   std::sort(out.begin(), out.end(), [](const BotRef& x, const BotRef& y) { return x.id < y.id; });
@@ -600,7 +661,7 @@ static BotRef resolveBot(const std::string& arg) {
                  arg.c_str(), r.path.c_str());
     std::fprintf(stderr, "available bots:");
     for (const BotRef& b : discoverBots()) std::fprintf(stderr, " %s", b.id.c_str());
-    std::fprintf(stderr, "\n(build them with: make)\n");
+    std::fprintf(stderr, "\n(build them with the start script or build.py)\n");
     std::exit(2);
   }
   return r;
@@ -674,7 +735,6 @@ static int runTournament(std::vector<BotRef> bots, int gamesPerPair, Config cfg)
   }
   std::vector<Standing> st(n);
   for (size_t i = 0; i < n; i++) st[i].name = bots[i].id;
-  // grid[i][j] = wins/losses/draws from i's perspective
   struct Cell { int w = 0, l = 0, d = 0; };
   std::vector<std::vector<Cell>> grid(n, std::vector<Cell>(n));
 
@@ -746,41 +806,30 @@ static int runTournament(std::vector<BotRef> bots, int gamesPerPair, Config cfg)
 }
 
 // --------------------------------------------------------- interactive mode
-// JSON events on stdout, human moves on stdin. Used by the web UI's Play tab.
-//   in : "move r?p" | "resign"
-//   out: {"type":"hello"...} {"type":"state"...} {"type":"illegal"...}
-//        {"type":"turn"...}  {"type":"end"...}
+// JSON events on stdout, human input on stdin. Used by the web UI's Play tab.
+//   in : "shop <tok>" | "attack <tok>" | "resign"
+//   out: hello / state / shopped / illegal / turn / end events
 
 static void emitLine(const std::string& s) {
   std::printf("%s\n", s.c_str());
   std::fflush(stdout);
 }
 
-static std::string sideJson(const Player& p, const Move* last) {
-  std::ostringstream o;
-  o << "{\"hand\":" << arr3(p.hand) << ",\"coins\":" << p.coins << ",\"last\":";
-  if (last) o << "\"" << last->str() << "\"";
-  else o << "null";
-  o << "}";
-  return o.str();
-}
-
 static int runInteractive(const BotRef& bot, char humanSide, Config cfg) {
   Player a, b;
-  Move lastA, lastB;
+  Attack lastA, lastB;
   bool haveLast = false;
   Proc p;
+  std::mt19937 gameRng(cfg.seed * 7919u + 17u);
 
   auto endEvent = [&](char winner, const std::string& reason) {
     std::ostringstream o;
     o << "{\"type\":\"end\",\"winner\":\""
       << (winner == 'a' ? "a" : winner == 'b' ? "b" : "draw")
       << "\",\"reason\":\"" << jesc(reason) << "\""
-      << ",\"final\":{\"ah\":" << arr3(a.hand) << ",\"bh\":" << arr3(b.hand)
-      << ",\"ac\":" << a.coins << ",\"bc\":" << b.coins << "}}";
+      << ",\"final\":{\"a\":" << sideJson(a) << ",\"b\":" << sideJson(b) << "}}";
     emitLine(o.str());
-    const char* r = winner == 'd' ? "draw" : "lose";  // from the bot's view; close enough on wins
-    p.writeLine(std::string("end ") + r + " reason " + reason);
+    p.writeLine(std::string("end ") + (winner == 'd' ? "draw" : "lose") + " reason " + reason);
     p.terminate();
   };
 
@@ -806,62 +855,101 @@ static int runInteractive(const BotRef& bot, char humanSide, Config cfg) {
            jesc(botDisp) + "\",\"human\":\"" + std::string(1, humanSide) +
            "\",\"maxTurns\":" + std::to_string(cfg.maxTurns) + "}");
 
+  // reads one human line; returns false on EOF/resign
+  auto humanLine = [&](std::string& out) {
+    if (!std::getline(std::cin, out)) return false;
+    while (!out.empty() && (out.back() == '\r' || out.back() == ' ')) out.pop_back();
+    return out != "resign";
+  };
+
   for (int t = 1; t <= cfg.maxTurns; t++) {
+    Player& hp = humanSide == 'a' ? a : b;
+    Player& bp = humanSide == 'a' ? b : a;
+
     emitLine("{\"type\":\"state\",\"turn\":" + std::to_string(t) +
-             ",\"a\":" + sideJson(a, haveLast ? &lastA : nullptr) +
-             ",\"b\":" + sideJson(b, haveLast ? &lastB : nullptr) +
+             ",\"special\":" + (t % SPECIAL_EVERY == 0 ? "true" : "false") +
+             ",\"a\":" + sideJson(a) + ",\"b\":" + sideJson(b) +
              ",\"human\":\"" + std::string(1, humanSide) + "\"}");
 
-    Player& hp = humanSide == 'a' ? a : b;
-    Move hm;
-    for (;;) {  // humans get retries, not forfeits
+    // ---- human shop (retries allowed)
+    Shop hShop;
+    for (;;) {
       std::string line;
-      if (!std::getline(std::cin, line)) {
-        endEvent(botSide, "resignation");
-        return 0;
-      }
-      while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-      if (line == "resign") {
-        endEvent(botSide, "resignation");
-        return 0;
-      }
-      if (line.rfind("move ", 0) != 0) {
-        emitLine("{\"type\":\"illegal\",\"reason\":\"expected 'move <spec>' or 'resign'\"}");
+      if (!humanLine(line)) { endEvent(botSide, "resignation"); return 0; }
+      if (line.rfind("shop ", 0) != 0) {
+        emitLine("{\"type\":\"illegal\",\"phase\":\"shop\",\"reason\":\"expected 'shop <tok>' or 'resign'\"}");
         continue;
       }
-      if (!Move::parse(line.substr(5), hm)) {
-        emitLine("{\"type\":\"illegal\",\"reason\":\"unparseable move '" +
-                 jesc(line.substr(5, 20)) + "'\"}");
+      if (!Shop::parse(line.substr(5), hShop)) {
+        emitLine("{\"type\":\"illegal\",\"phase\":\"shop\",\"reason\":\"unparseable purchase\"}");
         continue;
       }
-      std::string bad = validateMove(hp, hm);
+      std::string bad = validateShop(hp, hShop);
       if (!bad.empty()) {
-        emitLine("{\"type\":\"illegal\",\"reason\":\"" + jesc(bad) + "\"}");
+        emitLine("{\"type\":\"illegal\",\"phase\":\"shop\",\"reason\":\"" + jesc(bad) + "\"}");
         continue;
       }
       break;
     }
 
-    // Only now does the bot get its state — it can never see the human's move.
-    const Player& botP = botSide == 'a' ? a : b;
-    const Player& humP = botSide == 'a' ? b : a;
-    const Move* botLast = haveLast ? (botSide == 'a' ? &lastA : &lastB) : nullptr;
-    const Move* humLast = haveLast ? (botSide == 'a' ? &lastB : &lastA) : nullptr;
-    p.writeLine(stateLine(t, botP, humP, botLast, humLast));
-    Move bm;
-    SideFailure f = readMove(p, nowMs() + cfg.timeMs + cfg.graceMs, botP, bm);
-    if (f.failed) {
-      endEvent(humanSide, "forfeit: " + f.why);
-      return 0;
+    // ---- bot shop (only now does the bot see this turn's state)
+    const Attack* botLast = haveLast ? (botSide == 'a' ? &lastA : &lastB) : nullptr;
+    const Attack* humLast = haveLast ? (botSide == 'a' ? &lastB : &lastA) : nullptr;
+    p.writeLine(stateLine(t, bp, hp, botLast, humLast));
+    Shop bShop;
+    SideFailure f = readPhase(p, nowMs() + cfg.timeMs + cfg.graceMs, "shop",
+                              [&](const std::string& tok) {
+      if (!Shop::parse(tok, bShop)) return std::string("unparseable shop");
+      std::string bad = validateShop(bp, bShop);
+      return bad.empty() ? std::string() : "illegal shop (" + bad + ")";
+    });
+    if (f.failed) { endEvent(humanSide, "forfeit: " + f.why); return 0; }
+
+    applyShop(hp, hShop);
+    applyShop(bp, bShop);
+    const Shop& sa = humanSide == 'a' ? hShop : bShop;
+    const Shop& sb = humanSide == 'a' ? bShop : hShop;
+    emitLine("{\"type\":\"shopped\",\"a\":\"" + sa.str() + "\",\"b\":\"" + sb.str() + "\"}");
+    p.writeLine("shopped my " + bShop.str() + " opp " + hShop.str());
+
+    // ---- human attack (retries allowed)
+    Attack hAtk;
+    for (;;) {
+      std::string line;
+      if (!humanLine(line)) { endEvent(botSide, "resignation"); return 0; }
+      if (line.rfind("attack ", 0) != 0) {
+        emitLine("{\"type\":\"illegal\",\"phase\":\"attack\",\"reason\":\"expected 'attack <tok>' or 'resign'\"}");
+        continue;
+      }
+      if (!Attack::parse(line.substr(7), hAtk)) {
+        emitLine("{\"type\":\"illegal\",\"phase\":\"attack\",\"reason\":\"unparseable attack\"}");
+        continue;
+      }
+      std::string bad = validateAttack(hp, hAtk);
+      if (!bad.empty()) {
+        emitLine("{\"type\":\"illegal\",\"phase\":\"attack\",\"reason\":\"" + jesc(bad) + "\"}");
+        continue;
+      }
+      break;
     }
+
+    // ---- bot attack
+    Attack bAtk;
+    f = readPhase(p, nowMs() + cfg.timeMs + cfg.graceMs, "attack",
+                  [&](const std::string& tok) {
+      if (!Attack::parse(tok, bAtk)) return std::string("unparseable attack");
+      std::string bad = validateAttack(bp, bAtk);
+      return bad.empty() ? std::string() : "illegal attack (" + bad + ")";
+    });
+    if (f.failed) { endEvent(humanSide, "forfeit: " + f.why); return 0; }
 
     TurnLog tl;
     tl.t = t;
-    tl.a = humanSide == 'a' ? hm : bm;
-    tl.b = humanSide == 'a' ? bm : hm;
-    tl.r = applyTurn(a, b, tl.a, tl.b);
-    tl.ah = a.hand; tl.bh = b.hand;
-    tl.ac = a.coins; tl.bc = b.coins;
+    tl.sa = sa; tl.sb = sb;
+    tl.a = humanSide == 'a' ? hAtk : bAtk;
+    tl.b = humanSide == 'a' ? bAtk : hAtk;
+    tl.r = applyCombat(a, b, tl.a, tl.b, t, &gameRng);
+    tl.aAfter = a; tl.bAfter = b;
     std::string tj = turnJson(tl);
     tj.insert(1, "\"type\":\"turn\",");
     emitLine(tj);
@@ -883,7 +971,7 @@ static int runInteractive(const BotRef& bot, char humanSide, Config cfg) {
 
 static void usage() {
   std::printf(
-      "Crafti RPS Arena — Advanced Tactical RPS match runner\n\n"
+      "Crafti RPS Arena — Advanced Tactical RPS V2 match runner\n\n"
       "usage:\n"
       "  arena play <botA> <botB> [options]         one game\n"
       "  arena match <botA> <botB> -n <N> [options] N-game series\n"
@@ -892,7 +980,7 @@ static void usage() {
       "  arena list                                 list available bots\n\n"
       "options:\n"
       "  --json           machine-readable output\n"
-      "  --time-ms <N>    per-move time limit (default 300)\n"
+      "  --time-ms <N>    per-phase time limit (default 300)\n"
       "  --turns <N>      turn limit (default 100)\n"
       "  --games <N>      tournament games per pairing (default 10)\n"
       "  -n <N>           match length (default 100)\n"

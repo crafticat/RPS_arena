@@ -66,10 +66,11 @@
     <div class="ledger red" id="play-you"></div>
 
     <div class="controls" id="play-controls">
-      <div class="picker" id="pick-card"></div>
-      <div class="picker" id="pick-upgrade"></div>
-      <div class="picker" id="pick-disguise" hidden></div>
-      <button id="play-go" class="primary big" disabled>Play card</button>
+      <div class="shop-note" id="play-phase-note">shop phase — buy one thing (or save)</div>
+      <div class="reveal-strip" id="shop-reveal" hidden></div>
+      <div class="picker" id="pick-shop"></div>
+      <div class="picker" id="pick-attack" hidden></div>
+      <button id="play-go" class="primary big" disabled>Confirm</button>
     </div>
   </div>
 
@@ -164,45 +165,56 @@
 <section id="tab-rules" class="tab">
   <div class="docs">
     <h2>The game in one breath</h2>
-    <p>Both players start with <b>21 cards</b> — 7🪨 7📄 7✂️ — and pick one card each turn, simultaneously.
-    Loser's card is <b>destroyed forever</b>; winner's card (and both cards on a tie) go back to hand.
-    Run out of cards and you lose. Survive 100 turns and the bigger hand wins.
-    Everything is <b>public</b>: both sides see both hands, coins, and history.</p>
+    <p>Both players start with <b>30 cards</b> — 10🪨 10📄 10✂️ — and 0 Crafticoins. Every turn has two phases.
+    <b>Shop:</b> both players secretly buy <b>at most one thing</b>; purchases are then revealed to both sides.
+    <b>Attack:</b> both players pick a card, simultaneously. Loser's card is <b>destroyed forever</b>;
+    winner's card (and both cards on a tie) go back to hand. Run out of cards and you lose.
+    Survive 100 turns and the bigger hand wins. Everything is <b>public</b>: hands, tiers, coins, purchases, history.</p>
 
     <h2>Crafticoins 🪙</h2>
-    <p>Play the same <i>base</i> shape two turns in a row → <b>+1 Crafticoin</b> (even if the card died; disguises count as their base; you can't spend a coin the same turn you earn it).</p>
+    <p>Attack with the same <i>shape</i> two turns in a row → <b>+2 Crafticoins</b> (even if the card died).
+    Bombs have no shape — playing one breaks your combo chain. You can't spend a coin the same turn you earn it.</p>
 
-    <h2>Upgrades</h2>
+    <h2>The shop (one purchase per turn, all purchases permanent)</h2>
     <table class="rules-table">
-      <tr><th class="mono">r+</th><td><b>1🪙</b></td><td>beats the plain version of itself (<span class="mono">r+</span> beats <span class="mono">r</span>); normal rules vs everything else; <span class="mono">r+</span> vs <span class="mono">r+</span> ties</td></tr>
-      <tr><th class="mono">r?p</th><td><b>1🪙</b></td><td>your rock <i>fights as paper</i> this turn; if it survives it returns as a rock; coin combos use the real base shape</td></tr>
-      <tr><th class="mono">r!</th><td><b>2🪙</b></td><td>bomb: if it <b>loses</b>, the card that beat it is destroyed too; on a win or tie it just returns as a normal card</td></tr>
+      <tr><th class="mono">⬆ upgrade</th><td><b>2🪙</b> tier 0→1<br><b>1🪙</b> above</td><td>+1 tier on <b>one specific card</b>. Same shape: higher tier wins the clash, equal tiers tie. <b>Different shapes ignore tiers</b> — plain 📄 still eats 🪨+9. Winners keep their tier forever.</td></tr>
+      <tr><th class="mono">💣 bomb</th><td><b>5🪙</b></td><td>a card that <b>trades</b>: play it and both played cards are destroyed, no winner, no loser. Guaranteed 1-for-1, no prediction needed.</td></tr>
+      <tr><th class="mono">🛒 card</th><td><b>7🪙</b></td><td>a brand-new tier-0 card of any shape, straight into your hand.</td></tr>
     </table>
-    <p class="fine">One upgrade per card per turn. A disguise must be a different shape. Illegal move, crash, or blowing the per-move time limit (default 300&nbsp;ms) forfeits the game — humans in the Play tab get a retry instead.</p>
+
+    <h2>⚠ Danger rounds</h2>
+    <p>Every 5th turn (5, 10, 15…) the clash <b>loser burns one extra random card</b> from their hand —
+    upgraded cards and bombs included. Ties and bomb trades are safe. Plan around the clock.</p>
+    <p class="fine">Illegal token, crash, or blowing the per-phase time limit (default 300&nbsp;ms) forfeits the game — humans in the Play tab get a retry instead.</p>
 
     <h2>Write your bot in four steps</h2>
     <ol class="steps">
       <li>Open <span class="mono">bots/my_bot.cpp</span> — it's a working bot with the whole API in comments.</li>
-      <li>Change <span class="mono">choose(const State&amp; s)</span> to return a better <span class="mono">Move</span>.</li>
+      <li>Fill in <span class="mono">chooseShop()</span> and <span class="mono">chooseAttack()</span>.</li>
       <li>Hit <b>⟳ Rebuild bots</b> up top (or rerun the start script / <span class="mono">python3 build.py</span>).</li>
       <li>Fight it here — or copy the file to <span class="mono">bots/your_name.cpp</span> to enter the tournament.</li>
     </ol>
 
     <h2>The API you'll actually use</h2>
-    <pre class="mono code">Move choose(const State&amp; s) override {
-  s.turn                    // 1-based turn number
-  s.me.hand[ROCK]           // your cards left (PAPER, SCISSORS too)
-  s.me.coins                // your Crafticoins
-  s.opp.hand, s.opp.coins   // theirs — perfect information
-  s.hasHistory()            // false on turn 1
-  s.myLast(), s.oppLast()   // last turn's Moves
-  s.legalMoves()            // everything you can afford right now
-  s.next(mine, theirs)      // full one-turn simulation → State
+    <pre class="mono code">Shop chooseShop(const State&amp; s) override {
+  return Shop::none();               // save up (always legal)
+  return Shop::upgrade(ROCK, 0);     // one r0 card -> tier 1   (2🪙, then 1🪙)
+  return Shop::bomb();               // 5🪙
+  return Shop::card(PAPER);          // 7🪙
+}
 
-  return Move::play(ROCK);          // free
-  return Move::plus(PAPER);         // p+   1 coin
-  return Move::shift(ROCK, PAPER);  // r?p  1 coin
-  return Move::bomb(SCISSORS);      // s!   2 coins
+Attack chooseAttack(const State&amp; s) override {
+  s.me.count(ROCK)           // cards of a shape    s.me.coins, s.me.bombs
+  s.me.cards[ROCK]           // map: tier -> count  s.me.maxTier(ROCK)
+  s.opp...                   // everything about them — perfect information
+  s.myShopNow, s.oppShopNow  // this turn's revealed purchases!
+  s.isSpecialRound()         // danger round? loser burns an extra card
+  s.legalAttacks()           // every card you can play
+  s.next(mine, theirs)       // full one-turn simulation → State
+
+  return Attack::card(ROCK, 0);      // "r"  — plain rock
+  return Attack::card(ROCK, 3);      // "r3" — your tier-3 rock
+  return Attack::bombCard();         // "!"  — trade 1-for-1
 }</pre>
 
     <h2>Command line</h2>
@@ -217,10 +229,11 @@ python3 build.py --test             # rules unit tests
 
     <h2>House rules the engine enforces</h2>
     <ul class="fine-list">
-      <li>Costs are paid when you submit; the coin you earn this turn arrives after.</li>
-      <li><span class="mono">x+</span> only out-ranks the same effective shape — <span class="mono">p</span> still beats <span class="mono">r+</span>, and <span class="mono">r+</span> beats <span class="mono">p?r</span>.</li>
-      <li>A bomb explodes only on a loss — even bombs and upgraded cards die in the blast.</li>
-      <li>Both players eliminated on the same turn → draw. Turn 100 → most cards wins, equal is a draw.</li>
+      <li>Purchases resolve before attacks — you may play the card you just bought or upgraded.</li>
+      <li>Shop costs are paid immediately; this turn's combo income arrives after the clash.</li>
+      <li>Tiers only matter inside a mirror. Cross-shape, the classic triangle is absolute.</li>
+      <li>Bomb vs bomb: both die. Bombs count as cards for the win condition.</li>
+      <li>Both players eliminated on the same turn → draw. Turn 100 → most total cards wins, equal is a draw.</li>
     </ul>
   </div>
 </section>

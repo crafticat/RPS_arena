@@ -1,5 +1,5 @@
-/* RPS Arena UI. Vanilla JS; all game logic lives in the C++ engine —
-   this file only renders engine JSON and animates the duel. */
+/* RPS Arena UI — V2 (shop phase + attack phase). Vanilla JS; all game logic
+   lives in the C++ engine — this file renders engine JSON and animates. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -37,21 +37,32 @@ function toast(msg) {
   toastTimer = setTimeout(() => { t.hidden = true; }, 4000);
 }
 
-/* ---------------------------------------------------------- move parsing */
+/* ------------------------------------------------------------- tokens */
+/* attack tokens: "r", "r3", "!"  ·  shop tokens: "-", "b", "cr", "ur2" */
 
-function parseMv(mv) {
-  return {
-    base: mv[0],
-    up: mv.length > 1 ? mv[1] : "",          // '+', '!', '?' or ''
-    disguise: mv[1] === "?" ? mv[2] : null,
-  };
+function parseAtk(tok) {
+  if (tok === "!") return { bomb: true };
+  return { bomb: false, shape: tok[0], tier: tok.length > 1 ? parseInt(tok.slice(1), 10) : 0 };
 }
-function mvLabel(mv) {
-  const m = parseMv(mv);
-  if (m.up === "?") return `${GLYPH[m.base]}→${GLYPH[m.disguise]}`;
-  if (m.up === "+") return `${GLYPH[m.base]}+`;
-  if (m.up === "!") return `${GLYPH[m.base]}💣`;
-  return GLYPH[m.base];
+function atkLabel(tok) {
+  const a = parseAtk(tok);
+  if (a.bomb) return "💣";
+  return GLYPH[a.shape] + (a.tier > 0 ? "+" + a.tier : "");
+}
+function shopLabel(tok) {
+  if (!tok || tok === "-") return "nothing";
+  if (tok === "b") return "a 💣 bomb";
+  if (tok[0] === "c") return `a new ${GLYPH[tok[1]]} card`;
+  const shape = tok[1], tier = parseInt(tok.slice(2), 10);
+  return `⬆ ${GLYPH[shape]}${tier > 0 ? "+" + tier : ""} → +${tier + 1}`;
+}
+function freshSide() {
+  return { coins: 0, bombs: 0, r: [[0, 10]], p: [[0, 10]], s: [[0, 10]], total: 30 };
+}
+function sideTotal(side) {
+  let n = side.bombs;
+  for (const sh of SHAPES) for (const [, c] of side[sh]) n += c;
+  return n;
 }
 
 /* ---------------------------------------------------------------- tabs */
@@ -93,19 +104,24 @@ async function loadBots() {
 
 /* -------------------------------------------------------------- ledgers */
 
-function renderLedger(el, { corner, name, hand, coins, earned }) {
-  const stacks = SHAPES.map((s, i) => {
-    const n = hand[i];
-    const notches = Array.from({ length: 7 }, (_, k) =>
-      `<span class="notch${k < n ? " on" : ""}"></span>`).join("");
-    return `<div class="stack" title="${n} ${SHAPE_NAME[s]}">
-      <span class="glyph">${GLYPH[s]}</span><span class="count">×${n}</span>
-      <span class="notches">${notches}</span></div>`;
+function renderLedger(el, { corner, name, side, earned }) {
+  const stacks = SHAPES.map((sh) => {
+    const groups = side[sh].filter(([, c]) => c > 0);
+    const count = groups.reduce((n, [, c]) => n + c, 0);
+    const badges = groups.filter(([t]) => t > 0)
+      .map(([t, c]) => `+${t}${c > 1 ? "×" + c : ""}`).join(" ");
+    return `<div class="stack" title="${count} ${SHAPE_NAME[sh]}">
+      <span class="glyph">${GLYPH[sh]}</span><span class="count">×${count}</span>
+      ${badges ? `<span class="badges">${badges}</span>` : ""}</div>`;
   }).join("");
+  const bombs = side.bombs > 0
+    ? `<div class="stack bombs" title="${side.bombs} bomb(s)">
+         <span class="glyph">💣</span><span class="count">×${side.bombs}</span></div>`
+    : "";
   el.innerHTML = `
     <div class="who"><div class="corner">${corner} corner</div><div class="name">${name}</div></div>
-    <div class="coins" title="Crafticoins"><span class="arc${earned ? " pulse" : ""}"></span>${coins}${earned ? '<span class="plus-one">+1</span>' : ""}</div>
-    <div class="stacks">${stacks}</div>`;
+    <div class="coins" title="Crafticoins"><span class="arc${earned ? " pulse" : ""}"></span>${side.coins}${earned ? `<span class="plus-one">+${earned}</span>` : ""}</div>
+    <div class="stacks">${stacks}${bombs}</div>`;
 }
 
 /* ----------------------------------------------------------- duel cards */
@@ -113,19 +129,17 @@ function renderLedger(el, { corner, name, hand, coins, earned }) {
 function setCardBack(slot) {
   slot.innerHTML = `<div class="card-face back">?</div>`;
 }
-function setCardFace(slot, mv, effects = {}) {
-  const m = parseMv(mv);
-  let badge = "";
-  if (m.up === "+") badge = `<span class="badge">+1</span>`;
-  if (m.up === "!") badge = `<span class="badge">💣</span>`;
-  const sub = m.up === "?" ? `<span class="sub">fights as ${GLYPH[m.disguise]}</span>` : "";
+function setCardFace(slot, tok, effects = {}) {
+  const a = parseAtk(tok);
+  const glyph = a.bomb ? "💣" : GLYPH[a.shape];
+  const tier = !a.bomb && a.tier > 0 ? `<span class="tier">+${a.tier}</span>` : "";
   const cls = ["card-face"];
   if (effects.flip) cls.push("flip-in");
-  slot.innerHTML = `<div class="${cls.join(" ")}">${badge}${GLYPH[m.base]}${sub}</div>`;
+  slot.innerHTML = `<div class="${cls.join(" ")}">${tier}${glyph}</div>`;
   return slot.firstElementChild;
 }
 
-/* Spark burst when a card dies; bombs get more sparks plus a shockwave ring. */
+/* Spark burst when a card dies; bombs get more sparks plus a shockwave. */
 function spawnSparks(slot, boom) {
   if (REDUCED) return;
   const n = boom ? 16 : 9;
@@ -147,37 +161,46 @@ function spawnSparks(slot, boom) {
   }
 }
 
-/* One simultaneous reveal. prefix is "play" or "watch"; ev is a turn event.
-   speedFactor < 1 compresses the choreography for fast playback. */
+function setDanger(prefix, on) {
+  document.querySelector(`#tab-${prefix} .duel-mid`).classList.toggle("danger", !!on);
+}
+
+/* One simultaneous reveal. ev is a V2 turn event. */
 async function animateDuel(prefix, ev, speedFactor = 1) {
   const slotA = $(`${prefix}-card-a`), slotB = $(`${prefix}-card-b`);
+  const bought = (ev.a.shop !== "-" || ev.b.shop !== "-")
+    ? `🛒 ${shopLabel(ev.a.shop)} · ${shopLabel(ev.b.shop)}` : "";
+  $(`${prefix}-clash`).textContent = bought;
   const faceA = setCardFace(slotA, ev.a.mv, { flip: true });
   const faceB = setCardFace(slotB, ev.b.mv, { flip: true });
-  $(`${prefix}-clash`).textContent = "";
   await sleep(480 * speedFactor);
 
-  const bombA = parseMv(ev.a.mv).up === "!" && ev.a.destroyed;
-  const bombB = parseMv(ev.b.mv).up === "!" && ev.b.destroyed;
-  if (ev.a.destroyed) { faceA.classList.add(bombA ? "boom" : "destroyed"); spawnSparks(slotA, bombA); }
-  if (ev.b.destroyed) { faceB.classList.add(bombB ? "boom" : "destroyed"); spawnSparks(slotB, bombB); }
+  const boom = ev.win === "trade";
+  if (ev.a.destroyed) { faceA.classList.add(boom ? "boom" : "destroyed"); spawnSparks(slotA, boom); }
+  if (ev.b.destroyed) { faceB.classList.add(boom ? "boom" : "destroyed"); spawnSparks(slotB, boom); }
   if (ev.win === "a" && !ev.a.destroyed) faceA.classList.add("winner-glow");
   if (ev.win === "b" && !ev.b.destroyed) faceB.classList.add("winner-glow");
 
-  const note =
+  let note =
+    ev.win === "trade" ? "💥 bomb trade — both cards destroyed" :
     ev.win === "tie" ? "tie — both cards return" :
-    ev.a.destroyed && ev.b.destroyed ? "💥 bomb takes both cards" :
     ev.win === "a" ? "red corner takes the exchange" :
     "blue corner takes the exchange";
+  if (ev.a.lost) note += ` · ⚠ red burns ${atkLabel(ev.a.lost)}`;
+  if (ev.b.lost) note += ` · ⚠ blue burns ${atkLabel(ev.b.lost)}`;
   $(`${prefix}-clash`).textContent = note;
   await sleep(680 * speedFactor);
 }
 
 function pushHistoryChip(prefix, ev) {
   const chip = document.createElement("span");
-  chip.className = `chip win-${ev.win}`;
-  chip.textContent = `${mvLabel(ev.a.mv)} ${mvLabel(ev.b.mv)}`;
+  chip.className = `chip win-${ev.win === "trade" ? "tie" : ev.win}`;
+  chip.textContent = `${atkLabel(ev.a.mv)} ${atkLabel(ev.b.mv)}${ev.special ? "⚠" : ""}`;
   chip.title = `turn ${ev.t}: ${ev.a.mv} vs ${ev.b.mv} — ` +
-    (ev.win === "tie" ? "tie" : ev.win === "a" ? "red wins" : "blue wins");
+    (ev.win === "trade" ? "bomb trade" : ev.win === "tie" ? "tie" :
+     ev.win === "a" ? "red wins" : "blue wins") +
+    (ev.a.shop !== "-" ? ` · red bought ${shopLabel(ev.a.shop)}` : "") +
+    (ev.b.shop !== "-" ? ` · blue bought ${shopLabel(ev.b.shop)}` : "");
   $(`${prefix}-history`).appendChild(chip);
   chip.scrollIntoView({ block: "nearest" });
 }
@@ -188,92 +211,99 @@ const REASON_COPY = {
   "turn limit": "turn 100 — biggest hand wins",
   resignation: "resignation",
 };
-function friendlyReason(r) {
-  if (REASON_COPY[r]) return REASON_COPY[r];
-  return r; // forfeit reasons come through verbatim from the engine
-}
+const friendlyReason = (r) => REASON_COPY[r] || r;
 
 /* ==================================================================== PLAY */
 
 const play = {
   sid: null, over: true, botName: "",
-  hand: [7, 7, 7], coins: 0, oppHand: [7, 7, 7], oppCoins: 0,
-  turn: 1, maxTurns: 100,
-  selCard: null, selUp: "", selDisguise: null, busy: false,
+  me: freshSide(), opp: freshSide(),
+  turn: 1, maxTurns: 100, special: false,
+  phase: "shop",          // "shop" | "attack"
+  selTok: null, busy: false,
 };
 
 function playSyncState(ev) {
   play.turn = ev.turn;
-  play.hand = ev.a.hand; play.coins = ev.a.coins;
-  play.oppHand = ev.b.hand; play.oppCoins = ev.b.coins;
+  play.special = !!ev.special;
+  play.me = ev.a;
+  play.opp = ev.b;
 }
 
 function renderPlayLedgers(earnedA, earnedB) {
-  renderLedger($("play-you"), {
-    corner: "red", name: "you", hand: play.hand, coins: play.coins, earned: earnedA,
-  });
-  renderLedger($("play-opp"), {
-    corner: "blue", name: play.botName, hand: play.oppHand, coins: play.oppCoins, earned: earnedB,
-  });
+  renderLedger($("play-you"), { corner: "red", name: "you", side: play.me, earned: earnedA });
+  renderLedger($("play-opp"), { corner: "blue", name: play.botName, side: play.opp, earned: earnedB });
   $("play-turn").textContent = `turn ${play.turn}/${play.maxTurns}`;
   $("play-prog").style.width = `${(100 * (play.turn - 1)) / play.maxTurns}%`;
+  setDanger("play", play.special);
 }
 
-function upgradeCost(up) { return up === "!" ? 2 : up === "" ? 0 : 1; }
+function upgradeCost(tier) { return tier === 0 ? 2 : 1; }
+
+function shopOptions(side) {
+  const opts = [{ tok: "-", label: "Save coins", hint: "no purchase" }];
+  for (const sh of SHAPES)
+    for (const [tier, cnt] of side[sh]) {
+      if (cnt <= 0) continue;
+      const cost = upgradeCost(tier);
+      if (side.coins >= cost)
+        opts.push({
+          tok: `u${sh}${tier}`,
+          label: `⬆ ${GLYPH[sh]}${tier > 0 ? "+" + tier : ""}`,
+          hint: `→ +${tier + 1} · ${cost}🪙`,
+        });
+    }
+  if (side.coins >= 5) opts.push({ tok: "b", label: "💣 bomb", hint: "5🪙 · trades 1-for-1" });
+  if (side.coins >= 7)
+    for (const sh of SHAPES)
+      opts.push({ tok: "c" + sh, label: `🛒 ${GLYPH[sh]}`, hint: "new card · 7🪙" });
+  return opts;
+}
+
+function attackOptions(side) {
+  const opts = [];
+  for (const sh of SHAPES)
+    for (const [tier, cnt] of side[sh]) {
+      if (cnt <= 0) continue;
+      opts.push({
+        tok: sh + (tier > 0 ? tier : ""),
+        label: `${GLYPH[sh]}${tier > 0 ? "+" + tier : ""}`,
+        hint: `×${cnt}`,
+        big: true,
+      });
+    }
+  if (side.bombs > 0) opts.push({ tok: "!", label: "💣", hint: `×${side.bombs} trade`, big: true });
+  return opts;
+}
 
 function renderPickers() {
-  const cardEl = $("pick-card");
-  cardEl.innerHTML = "";
-  SHAPES.forEach((s, i) => {
+  const isShop = play.phase === "shop";
+  $("play-phase-note").textContent = play.over ? "" :
+    isShop ? "shop phase — buy one thing (or save)" :
+    "attack phase — pick your card" + (play.special ? " · danger round: don't lose!" : "");
+  const listEl = isShop ? $("pick-shop") : $("pick-attack");
+  $("pick-shop").hidden = !isShop;
+  $("pick-attack").hidden = isShop;
+  listEl.innerHTML = "";
+  const opts = isShop ? shopOptions(play.me) : attackOptions(play.me);
+  opts.forEach((o) => {
     const b = document.createElement("button");
-    b.className = "pick-btn" + (play.selCard === s ? " sel" : "");
-    b.disabled = play.hand[i] === 0 || play.over || play.busy;
-    b.innerHTML = `<span class="big-glyph">${GLYPH[s]}</span> ${SHAPE_NAME[s]} <small>×${play.hand[i]}</small>`;
-    b.onclick = () => { play.selCard = s; renderPickers(); };
-    cardEl.appendChild(b);
+    b.className = "pick-btn" + (play.selTok === o.tok ? " sel" : "");
+    b.disabled = play.over || play.busy;
+    b.innerHTML = (o.big ? `<span class="big-glyph">${o.label}</span>` : o.label) +
+      ` <small>${o.hint}</small>`;
+    b.onclick = () => { play.selTok = o.tok; renderPickers(); };
+    listEl.appendChild(b);
   });
-
-  const upEl = $("pick-upgrade");
-  upEl.innerHTML = "";
-  [["", "plain", "free"], ["+", "upgrade", "1🪙 beats its plain self"],
-   ["?", "disguise", "1🪙 fights as another shape"], ["!", "bomb", "2🪙 dies loudly"]]
-    .forEach(([up, label, hint]) => {
-      const b = document.createElement("button");
-      b.className = "pick-btn" + (play.selUp === up ? " sel" : "");
-      b.disabled = play.over || play.busy || play.coins < upgradeCost(up);
-      b.innerHTML = `${label} <small>${hint}</small>`;
-      b.onclick = () => {
-        play.selUp = up;
-        if (up !== "?") play.selDisguise = null;
-        renderPickers();
-      };
-      upEl.appendChild(b);
-    });
-
-  const dgEl = $("pick-disguise");
-  dgEl.hidden = play.selUp !== "?";
-  dgEl.innerHTML = "";
-  if (play.selUp === "?" && play.selCard) {
-    SHAPES.filter((s) => s !== play.selCard).forEach((s) => {
-      const b = document.createElement("button");
-      b.className = "pick-btn" + (play.selDisguise === s ? " sel" : "");
-      b.innerHTML = `fight as <span class="big-glyph">${GLYPH[s]}</span>`;
-      b.onclick = () => { play.selDisguise = s; renderPickers(); };
-      dgEl.appendChild(b);
-    });
-  }
-
-  const ready = play.selCard && !play.over && !play.busy &&
-    (play.selUp !== "?" || play.selDisguise);
-  $("play-go").disabled = !ready;
+  $("play-go").textContent = isShop ? "Confirm purchase" : "Attack!";
+  $("play-go").disabled = play.over || play.busy || play.selTok === null;
 }
 
 async function playNewGame() {
   if (play.sid) api(`/api/session/${play.sid}`, undefined, "DELETE").catch(() => {});
   Object.assign(play, {
-    sid: null, over: false, hand: [7, 7, 7], coins: 0,
-    oppHand: [7, 7, 7], oppCoins: 0, turn: 1,
-    selCard: null, selUp: "", selDisguise: null, busy: false,
+    sid: null, over: false, me: freshSide(), opp: freshSide(),
+    turn: 1, special: false, phase: "shop", selTok: null, busy: false,
   });
   try {
     const d = await api("/api/session", { bot: $("play-bot").value, humanSide: "a" });
@@ -288,9 +318,10 @@ async function playNewGame() {
   $("play-banner").hidden = true;
   $("play-resign").hidden = false;
   $("play-history").innerHTML = "";
+  $("shop-reveal").hidden = true;
   setCardBack($("play-card-a"));
   setCardBack($("play-card-b"));
-  $("play-clash").textContent = "pick a card, then an upgrade";
+  $("play-clash").textContent = "";
   renderPlayLedgers();
   renderPickers();
 }
@@ -299,54 +330,100 @@ function showPlayEnd(ev) {
   play.over = true;
   play.sid = null;
   $("play-resign").hidden = true;
+  $("play-phase-note").textContent = "";
   const b = $("play-banner");
   const who = ev.winner === "a" ? "win" : ev.winner === "b" ? "lose" : "draw";
   b.className = "banner " + who;
   const headline = who === "win" ? "🏆 You win!" : who === "lose" ? `${play.botName} wins` : "🤝 Draw";
-  b.innerHTML = `<b>${headline}</b><br>${friendlyReason(ev.reason)} · ` +
-    `final cards you ${ev.final.ah[0] + ev.final.ah[1] + ev.final.ah[2]} — ` +
-    `${play.botName} ${ev.final.bh[0] + ev.final.bh[1] + ev.final.bh[2]}`;
+  const fa = ev.final ? sideTotal(ev.final.a) : "?";
+  const fb = ev.final ? sideTotal(ev.final.b) : "?";
+  b.innerHTML = `<b>${headline}</b><br>${friendlyReason(ev.reason)} · final cards you ${fa} — ${play.botName} ${fb}`;
   b.hidden = false;
   renderPickers();
 }
 
-async function playCard() {
-  if (play.busy || play.over || !play.selCard) return;
-  let spec = play.selCard;
-  if (play.selUp === "?") spec += "?" + play.selDisguise;
-  else spec += play.selUp;
-
+async function playSubmit() {
+  if (play.busy || play.over || play.selTok === null) return;
+  const tok = play.selTok;
   play.busy = true;
   renderPickers();
-  setCardBack($("play-card-a"));
-  setCardBack($("play-card-b"));
   try {
-    const d = await api(`/api/session/${play.sid}/move`, { move: spec });
-    for (const ev of d.events) {
-      if (ev.type === "illegal") toast("that move is illegal: " + ev.reason);
-      if (ev.type === "turn") {
-        await animateDuel("play", ev);
-        pushHistoryChip("play", ev);
-        play.hand = ev.after.ah; play.coins = ev.after.ac;
-        play.oppHand = ev.after.bh; play.oppCoins = ev.after.bc;
-        renderPlayLedgers(ev.a.earned, ev.b.earned);
+    if (play.phase === "shop") {
+      const d = await api(`/api/session/${play.sid}/shop`, { shop: tok });
+      for (const ev of d.events) {
+        if (ev.type === "illegal") toast("can't buy that: " + ev.reason);
+        if (ev.type === "shopped") {
+          play.phase = "attack";
+          const strip = $("shop-reveal");
+          strip.innerHTML =
+            `<span>you bought <b>${shopLabel(ev.a)}</b></span>` +
+            `<span>${play.botName} bought <b>${shopLabel(ev.b)}</b></span>`;
+          strip.hidden = false;
+          // purchases change hands/coins before the attack — refetch from
+          // the shop tokens locally is fiddly; the next state event will
+          // resync, meanwhile apply the two cheap deltas for the pickers:
+          applyShopLocal(play.me, ev.a);
+          applyShopLocal(play.opp, ev.b);
+          renderPlayLedgers();
+        }
+        if (ev.type === "end") showPlayEnd(ev);
+        if (ev.type === "error") toast(ev.reason);
       }
-      if (ev.type === "state") { playSyncState(ev); renderPlayLedgers(); }
-      if (ev.type === "end") showPlayEnd(ev);
-      if (ev.type === "error") toast(ev.reason);
+    } else {
+      setCardBack($("play-card-a"));
+      setCardBack($("play-card-b"));
+      const d = await api(`/api/session/${play.sid}/move`, { move: tok });
+      for (const ev of d.events) {
+        if (ev.type === "illegal") toast("that attack is illegal: " + ev.reason);
+        if (ev.type === "turn") {
+          $("shop-reveal").hidden = true;
+          await animateDuel("play", ev);
+          pushHistoryChip("play", ev);
+          play.me = ev.after.a;
+          play.opp = ev.after.b;
+          renderPlayLedgers(ev.a.earned, ev.b.earned);
+        }
+        if (ev.type === "state") {
+          playSyncState(ev);
+          play.phase = "shop";
+          renderPlayLedgers();
+        }
+        if (ev.type === "end") showPlayEnd(ev);
+        if (ev.type === "error") toast(ev.reason);
+      }
     }
   } catch (e) { toast(e.message); }
   play.busy = false;
-  play.selCard = null; play.selUp = ""; play.selDisguise = null;
+  play.selTok = null;
   renderPickers();
 }
 
+// tiny local mirror of applyShop so pickers are correct pre-resync
+function applyShopLocal(side, tok) {
+  if (!tok || tok === "-") return;
+  if (tok === "b") { side.coins -= 5; side.bombs++; return; }
+  if (tok[0] === "c") {
+    side.coins -= 7;
+    const sh = tok[1];
+    const g = side[sh].find(([t]) => t === 0);
+    if (g) g[1]++; else side[sh].unshift([0, 1]);
+    return;
+  }
+  const sh = tok[1], tier = parseInt(tok.slice(2), 10);
+  side.coins -= upgradeCost(tier);
+  const from = side[sh].find(([t]) => t === tier);
+  if (from) from[1]--;
+  const to = side[sh].find(([t]) => t === tier + 1);
+  if (to) to[1]++; else { side[sh].push([tier + 1, 1]); side[sh].sort((x, y) => x[0] - y[0]); }
+  side[sh] = side[sh].filter(([, c]) => c > 0);
+}
+
 $("play-new").onclick = playNewGame;
-$("play-go").onclick = playCard;
+$("play-go").onclick = playSubmit;
 $("play-resign").onclick = async () => {
   if (!play.sid) return;
   await api(`/api/session/${play.sid}`, undefined, "DELETE").catch(() => {});
-  showPlayEnd({ winner: "b", reason: "resignation", final: { ah: play.hand, bh: play.oppHand } });
+  showPlayEnd({ winner: "b", reason: "resignation", final: { a: play.me, b: play.opp } });
 };
 
 /* =================================================================== WATCH */
@@ -355,15 +432,16 @@ const watch = { replay: null, idx: 0, playing: false, timer: null, gen: 0 };
 
 function watchRenderAt(idx, { animate } = {}) {
   const r = watch.replay;
-  const state = idx === 0
-    ? { ah: [7, 7, 7], bh: [7, 7, 7], ac: 0, bc: 0 }
-    : r.turns[idx - 1].after;
-  renderLedger($("watch-youL"), { corner: "red", name: r.aName, hand: state.ah, coins: state.ac });
-  renderLedger($("watch-oppL"), { corner: "blue", name: r.bName, hand: state.bh, coins: state.bc });
+  const stateA = idx === 0 ? freshSide() : r.turns[idx - 1].after.a;
+  const stateB = idx === 0 ? freshSide() : r.turns[idx - 1].after.b;
+  renderLedger($("watch-youL"), { corner: "red", name: r.aName, side: stateA });
+  renderLedger($("watch-oppL"), { corner: "blue", name: r.bName, side: stateB });
+  const shownTurn = Math.min(Math.max(1, idx + (animate ? 0 : 1)), r.turns.length);
   $("watch-turn").textContent = `turn ${Math.max(1, idx)}/${r.turns.length}`;
   $("watch-prog").style.width = r.turns.length ? `${(100 * idx) / r.turns.length}%` : "0%";
   $("w-pos").textContent = `${idx}/${r.turns.length}`;
   $("w-scrub").value = idx;
+  setDanger("watch", idx < r.turns.length && (idx + 1) % 5 === 0);
   if (!animate) {
     const h = $("watch-history");
     h.innerHTML = "";
@@ -374,6 +452,7 @@ function watchRenderAt(idx, { animate } = {}) {
       setCardFace($("watch-card-b"), r.turns[idx - 1].b.mv);
     }
   }
+  void shownTurn;
 }
 
 async function watchStep() {
@@ -382,6 +461,7 @@ async function watchStep() {
   const ev = r.turns[watch.idx];
   const factor = Math.max(0.15, Math.min(1, Number($("w-speed").value) / 450));
   const gen = watch.gen;
+  setDanger("watch", ev.special);
   await animateDuel("watch", ev, factor);
   if (gen !== watch.gen) return false;  // scrub/stop/new replay superseded this step
   watch.idx++;
@@ -567,7 +647,7 @@ $("tour-go").onclick = async () => {
         if (i === j || !cell) { html += `<td class="self">—</td>`; return; }
         const total = cell.w + cell.l + cell.d;
         const rate = total ? (cell.w + cell.d / 2) / total : 0.5;
-        const tilt = rate - 0.5; // >0: row bot on top → blue; <0 → red
+        const tilt = rate - 0.5; // >0: row bot on top → cyan; <0 → red
         const color = tilt >= 0 ? "47,157,196" : "226,105,95";
         const alpha = Math.min(0.85, Math.abs(tilt) * 1.7).toFixed(2);
         html += `<td style="background:rgba(${color},${alpha})" ` +
@@ -588,7 +668,7 @@ $("rebuild").onclick = async () => {
   const dlg = $("build-dialog");
   $("build-title").textContent = "Rebuilding…";
   $("build-title").className = "";
-  $("build-out").textContent = "running make…";
+  $("build-out").textContent = "running the build…";
   dlg.showModal();
   try {
     const d = await api("/api/build", {});

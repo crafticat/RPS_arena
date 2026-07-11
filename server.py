@@ -110,15 +110,15 @@ class Session:
                 self.over = True
                 return events
             events.append(ev)
-            if ev["type"] in ("state", "illegal"):
+            if ev["type"] in ("state", "shopped", "illegal"):
                 return events
             if ev["type"] == "end":
                 self.over = True
                 return events
 
-    def send_move(self, move):
+    def send_line(self, line):
         self.last_used = time.time()
-        self.proc.stdin.write("move " + move + "\n")
+        self.proc.stdin.write(line + "\n")
         self.proc.stdin.flush()
         return self.read_until_actionable()
 
@@ -272,20 +272,28 @@ class Handler(BaseHTTPRequestHandler):
                     s.close()
                 return self.send_json({"id": sid, "events": events})
 
-            m = re.match(r"^/api/session/([0-9a-f]{12})/move$", self.path)
+            m = re.match(r"^/api/session/([0-9a-f]{12})/(shop|move)$", self.path)
             if m:
+                sid, phase = m.group(1), m.group(2)
                 with SESSIONS_LOCK:
-                    s = SESSIONS.get(m.group(1))
+                    s = SESSIONS.get(sid)
                 if s is None:
                     return self.fail("no such session (it may have expired)", 404)
-                move = str(body.get("move", ""))
-                if not re.match(r"^[rps][+!]?$|^[rps]\?[rps]$", move):
-                    return self.fail("bad move spec")
+                if phase == "shop":
+                    tok = str(body.get("shop", "-"))
+                    if not re.match(r"^(-|b|c[rps]|u[rps]\d{1,2})$", tok):
+                        return self.fail("bad purchase")
+                    line = "shop " + tok
+                else:
+                    tok = str(body.get("move", ""))
+                    if not re.match(r"^([rps]\d{0,2}|!)$", tok):
+                        return self.fail("bad attack")
+                    line = "attack " + tok
                 with s.lock:
-                    events = s.send_move(move)
+                    events = s.send_line(line)
                 if s.over:
                     with SESSIONS_LOCK:
-                        SESSIONS.pop(m.group(1), None)
+                        SESSIONS.pop(sid, None)
                     s.close()
                 return self.send_json({"events": events})
 
