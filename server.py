@@ -34,7 +34,10 @@ ARENA = os.path.join(ROOT, "build", "arena" + EXE)
 BOTS_DIR = os.path.join(ROOT, "build", "bots")
 WEB_DIR = os.path.join(ROOT, "web")
 
-BOT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+def valid_bot_name(name):
+    """Anything list_bots() can produce: a plain filename, no path tricks."""
+    return (isinstance(name, str) and 0 < len(name) <= 64
+            and name == os.path.basename(name) and not name.startswith("."))
 SESSION_IDLE_LIMIT = 30 * 60  # seconds
 
 MIME = {
@@ -180,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(raw or b"{}")
 
     def check_bot(self, name):
-        if not isinstance(name, str) or not BOT_NAME_RE.match(name):
+        if not valid_bot_name(name):
             raise ValueError("invalid bot name")
         if name not in list_bots():
             raise ValueError("unknown bot '%s' — did you run make?" % name)
