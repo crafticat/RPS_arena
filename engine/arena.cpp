@@ -153,7 +153,8 @@ struct Proc {
   }
 
   bool readLine(std::string& out, int timeoutMs) {
-    long long deadline = nowMs() + timeoutMs;
+    long long waitStart = nowMs();
+    long long deadline = waitStart + timeoutMs;
     for (;;) {
       size_t nl = rbuf.find('\n');
       if (nl != std::string::npos) {
@@ -183,7 +184,11 @@ struct Proc {
         return false;
       }
       if (nowMs() >= deadline) return false;  // timeout
-      Sleep(2);
+      // Anonymous pipes can't be waited on, so we poll. Bots usually reply
+      // within microseconds — yield-spin briefly before real sleeps, because
+      // Sleep(>0) rounds up to the ~15.6ms system timer tick and would make
+      // a 300-game tournament take half an hour.
+      if (nowMs() - waitStart < 8) Sleep(0); else Sleep(1);
     }
   }
 
