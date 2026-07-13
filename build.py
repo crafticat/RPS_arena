@@ -75,8 +75,11 @@ def stale(src, out):
 def build_one(cc, src, out, label):
     if not stale(src, out):
         return (True, label, None)
-    r = subprocess.run(compile_cmd(cc, src, out), capture_output=True, text=True)
-    output = (r.stdout + r.stderr).strip()
+    # encoding= matters: compilers emit UTF-8 (g++ curly quotes), which the
+    # Windows locale codec can't decode — that kills the capture thread.
+    r = subprocess.run(compile_cmd(cc, src, out), capture_output=True,
+                       encoding="utf-8", errors="replace")
+    output = ((r.stdout or "") + (r.stderr or "")).strip()
     return (r.returncode == 0, label, output or None)
 
 

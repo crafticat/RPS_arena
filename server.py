@@ -80,7 +80,8 @@ class Session:
                "--time-ms", str(time_ms), "--seed", str(seed)]
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace",
+            bufsize=1)
         self.lock = threading.Lock()
         self.last_used = time.time()
         self.over = False
@@ -193,9 +194,10 @@ class Handler(BaseHTTPRequestHandler):
         if not os.access(ARENA, os.X_OK):
             self.fail("arena binary missing — run: make", 500)
             return None
-        r = subprocess.run([ARENA] + args, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([ARENA] + args, capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
         if r.returncode != 0:
-            self.fail("arena failed: " + r.stderr.strip()[:400], 500)
+            self.fail("arena failed: " + (r.stderr or "").strip()[:400], 500)
             return None
         return r.stdout
 
@@ -231,11 +233,14 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if self.path == "/api/build":
+                # encoding= matters: on Windows the default locale codec (e.g.
+                # cp1255) chokes on build.py's UTF-8 ✓/✗ output, killing the
+                # reader thread and leaving r.stdout as None.
                 r = subprocess.run([sys.executable, "build.py"], capture_output=True,
-                                   text=True, timeout=300)
+                                   encoding="utf-8", errors="replace", timeout=300)
                 return self.send_json({
                     "ok": r.returncode == 0,
-                    "output": (r.stdout + r.stderr)[-8000:],
+                    "output": ((r.stdout or "") + (r.stderr or ""))[-8000:],
                     "bots": list_bots(),
                 })
 
