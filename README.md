@@ -26,8 +26,11 @@ bot, use the **⟳ Rebuild bots** button in the UI (or run the script again).
 
 - **macOS:** `xcode-select --install` (gives you both).
 - **Linux:** `sudo apt install build-essential python3` (or your distro's equivalent).
-- **Windows:** [Python 3](https://python.org) — tick *"Add python.exe to PATH"* —
-  plus a C++ compiler: **MinGW-w64 g++** (easiest: [winlibs.com](https://winlibs.com),
+- **Windows:** none up front — `start.bat` checks for Python 3 and a C++
+  compiler and offers to install anything missing via winget (Python 3 +
+  MinGW-w64 g++ from WinLibs; no admin rights needed). Manual route, if you
+  prefer or winget is blocked: [Python 3](https://python.org) — tick *"Add
+  python.exe to PATH"* — plus **MinGW-w64 g++** ([winlibs.com](https://winlibs.com),
   unzip and add its `bin/` to PATH; or MSYS2) *or* Visual Studio Build Tools
   (then launch `start.bat` from a *Developer Command Prompt* so `cl` is on PATH).
 
@@ -209,7 +212,8 @@ server.py              the local web server (--port, --host, --open)
 
 ## Troubleshooting
 
-- **“no C++ compiler found”** — install per the prerequisites above; on Windows
+- **“no C++ compiler found”** — on Windows, run `start.bat` again and accept the
+  winget install when offered; otherwise install per the prerequisites above and
   make sure `g++` (or `cl`) is on PATH in the terminal you're using.
 - **`start.bat` window flashes and closes** — it should pause; if not, run it
   from a Command Prompt to read the error (usually Python missing from PATH).
