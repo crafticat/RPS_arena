@@ -102,6 +102,21 @@ async function loadBots() {
   return bots;
 }
 
+/* ---------------------------------------------------------- debug panes */
+
+function setDebugPane(id, text) {
+  $(id).textContent = (text && text.trim())
+    ? text
+    : "(no output — print to std::cerr in your bot to see it here)";
+}
+
+function appendDebugPane(id, lines) {
+  if (!lines || !lines.length) return;
+  const el = $(id);
+  el.textContent += (el.textContent ? "\n" : "") + lines.join("\n");
+  el.scrollTop = el.scrollHeight;
+}
+
 /* -------------------------------------------------------------- ledgers */
 
 function renderLedger(el, { corner, name, side, earned }) {
@@ -308,6 +323,8 @@ async function playNewGame() {
   try {
     const d = await api("/api/session", { bot: $("play-bot").value, humanSide: "a" });
     play.sid = d.id;
+    $("play-debug").textContent = "";
+    appendDebugPane("play-debug", d.debug);
     for (const ev of d.events) {
       if (ev.type === "hello") { play.botName = ev.botName; play.maxTurns = ev.maxTurns; }
       if (ev.type === "state") playSyncState(ev);
@@ -350,6 +367,7 @@ async function playSubmit() {
   try {
     if (play.phase === "shop") {
       const d = await api(`/api/session/${play.sid}/shop`, { shop: tok });
+      appendDebugPane("play-debug", d.debug);
       for (const ev of d.events) {
         if (ev.type === "illegal") toast("can't buy that: " + ev.reason);
         if (ev.type === "shopped") {
@@ -373,6 +391,7 @@ async function playSubmit() {
       setCardBack($("play-card-a"));
       setCardBack($("play-card-b"));
       const d = await api(`/api/session/${play.sid}/move`, { move: tok });
+      appendDebugPane("play-debug", d.debug);
       for (const ev of d.events) {
         if (ev.type === "illegal") toast("that attack is illegal: " + ev.reason);
         if (ev.type === "turn") {
@@ -514,7 +533,8 @@ $("watch-go").onclick = async () => {
   try {
     const seed = rndSeed();
     const r = await api("/api/play", { a: $("watch-a").value, b: $("watch-b").value, seed });
-    loadReplayIntoWatch(r, `seed ${seed} — same seed replays the same game`);
+    setDebugPane("watch-debug", r.debug);
+    loadReplayIntoWatch(r.replay || r, `seed ${seed} — same seed replays the same game`);
     watch.playing = true;
     $("w-playpause").textContent = "⏸";
     watchPlayLoop();
@@ -608,7 +628,10 @@ $("arena-go").onclick = async () => {
       dot.className = "dot " + (g.winner === "a" ? "a" : g.winner === "b" ? "b" : "d");
       dot.title = `game ${i + 1}: ` + (g.winner === "draw" ? "draw" :
         `${g.winner === "a" ? a : b} wins`) + ` (${g.reason}, ${g.turnsPlayed} turns)`;
-      dot.onclick = () => loadReplayIntoWatch(g, `game ${i + 1} of the ${a} vs ${b} match (seed ${g.seed})`);
+      dot.onclick = () => {
+        setDebugPane("watch-debug", "(stderr isn't captured per-game in matches — replay this seed from the Watch tab to see it)");
+        loadReplayIntoWatch(g, `game ${i + 1} of the ${a} vs ${b} match (seed ${g.seed})`);
+      };
       dots.appendChild(dot);
     });
   } catch (e) { toast(e.message); }

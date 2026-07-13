@@ -621,6 +621,32 @@ main { max-width: 1060px; margin: 0 auto; padding: 22px 20px 80px; }
   to { transform: scale(9); opacity: 0; border-width: 1px; }
 }
 
+/* ------------------------------------------------ debug pane */
+.debug-box {
+  margin: 0 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raised);
+}
+.debug-box summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  font-size: 13px;
+  user-select: none;
+}
+.debug-hint { opacity: 0.55; font-size: 12px; }
+.debug-box pre {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 200px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid var(--line);
+}
+
 /* ------------------------------------------------ history strip */
 .history {
   display: flex;

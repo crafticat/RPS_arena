@@ -80,7 +80,7 @@ class Session:
                "--time-ms", str(time_ms), "--seed", str(seed)]
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace",
+            stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
             bufsize=1)
         self.lock = threading.Lock()
         self.last_used = time.time()
@@ -88,6 +88,11 @@ class Session:
         # A pump thread avoids the select()-vs-buffered-readline deadlock.
         self.events = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
+        # Bot debug prints (std::cerr) arrive on stderr; keep a bounded tail
+        # so the UI can show them.
+        self.debug = []
+        self.debug_lock = threading.Lock()
+        threading.Thread(target=self._pump_err, daemon=True).start()
 
     def _pump(self):
         for line in self.proc.stdout:
@@ -96,6 +101,18 @@ class Session:
             except ValueError:
                 pass
         self.events.put(None)  # EOF sentinel
+
+    def _pump_err(self):
+        for line in self.proc.stderr:
+            with self.debug_lock:
+                self.debug.append(line.rstrip("\n"))
+                if len(self.debug) > 400:
+                    del self.debug[:200]
+
+    def drain_debug(self):
+        with self.debug_lock:
+            out, self.debug = self.debug, []
+        return out
 
     def read_event(self, timeout=10.0):
         """One JSON event from the engine, or None on timeout/EOF."""
@@ -191,6 +208,7 @@ class Handler(BaseHTTPRequestHandler):
         return name
 
     def run_arena(self, args, timeout=600):
+        """Returns the CompletedProcess (stdout = payload, stderr = bot debug)."""
         if not os.access(ARENA, os.X_OK):
             self.fail("arena binary missing — run: make", 500)
             return None
@@ -199,7 +217,7 @@ class Handler(BaseHTTPRequestHandler):
         if r.returncode != 0:
             self.fail("arena failed: " + (r.stderr or "").strip()[:400], 500)
             return None
-        return r.stdout
+        return r
 
     # -- static -------------------------------------------------------------
     def do_GET(self):
@@ -247,21 +265,27 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/play":
                 a, b = self.check_bot(body["a"]), self.check_bot(body["b"])
                 args = ["play", a, b, "--json"] + self.common_flags(body)
-                out = self.run_arena(args)
-                return None if out is None else self.send_raw_json(out)
+                r = self.run_arena(args)
+                if r is None:
+                    return None
+                # Bots' std::cerr lands on the arena's stderr — hand the tail
+                # to the UI so people can actually debug from the browser.
+                debug = (r.stderr or "")[-16000:]
+                return self.send_raw_json(
+                    '{"replay":%s,"debug":%s}' % (r.stdout.strip(), json.dumps(debug)))
 
             if self.path == "/api/match":
                 a, b = self.check_bot(body["a"]), self.check_bot(body["b"])
                 n = max(1, min(500, int(body.get("n", 50))))
                 args = ["match", a, b, "-n", str(n), "--json"] + self.common_flags(body)
-                out = self.run_arena(args)
-                return None if out is None else self.send_raw_json(out)
+                r = self.run_arena(args)
+                return None if r is None else self.send_raw_json(r.stdout)
 
             if self.path == "/api/tournament":
                 games = max(1, min(50, int(body.get("games", 10))))
                 args = ["tournament", "--games", str(games), "--json"] + self.common_flags(body)
-                out = self.run_arena(args)
-                return None if out is None else self.send_raw_json(out)
+                r = self.run_arena(args)
+                return None if r is None else self.send_raw_json(r.stdout)
 
             if self.path == "/api/session":
                 bot = self.check_bot(body["bot"])
@@ -278,7 +302,8 @@ class Handler(BaseHTTPRequestHandler):
                         SESSIONS[sid] = s
                 else:
                     s.close()
-                return self.send_json({"id": sid, "events": events})
+                return self.send_json({"id": sid, "events": events,
+                                       "debug": s.drain_debug()})
 
             m = re.match(r"^/api/session/([0-9a-f]{12})/(shop|move)$", self.path)
             if m:
@@ -303,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
                     with SESSIONS_LOCK:
                         SESSIONS.pop(sid, None)
                     s.close()
-                return self.send_json({"events": events})
+                return self.send_json({"events": events, "debug": s.drain_debug()})
 
             return self.fail("not found", 404)
         except (KeyError, ValueError, TypeError) as e:

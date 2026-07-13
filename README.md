@@ -135,6 +135,18 @@ seeded by the arena, so use it and your games stay reproducible (`--seed`).
 - One process per bot per game: globals reset every game, and your crashes can't
   hurt the arena.
 
+## Debugging your bot
+
+- Print anything to **stderr** (`std::cerr << "turn " << s.turn << ...`) —
+  never stdout, that belongs to the protocol.
+- **Web UI:** open the **🐞 bot debug output** panel (Play and Watch tabs) to
+  see those prints — live while you play, or per game after a Fight!.
+- **Terminal:** `./build/arena play my_bot gambit` streams them as the game runs.
+- Lost a weird game? Replay it exactly: every game is deterministic given its
+  seed — `./build/arena play my_bot gambit --seed N` (the Watch tab and Arena
+  dots show each game's seed).
+- Timeouts? Debug with `--time-ms 1000`, optimize, then verify at the default 300.
+
 ## CLI
 
 ```bash
